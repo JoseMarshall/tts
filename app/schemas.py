@@ -28,7 +28,8 @@ class TTSRequest(BaseModel):
 
     text: str = Field(..., min_length=1, description="Text to synthesise.")
     language: str = Field(
-        "Auto", description="Language name or code; backend-specific ('Auto' ok)."
+        "", description="Language name or code; backend-specific. Empty -> the "
+                        "configured/backend default (e.g. 'Auto' for Qwen)."
     )
     model: Optional[str] = Field(
         None,

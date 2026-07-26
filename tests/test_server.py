@@ -40,6 +40,19 @@ def test_explicit_mode_wins():
     assert req.resolve_mode() == "voice_design"
 
 
+def test_request_language_defaults_empty():
+    # Empty so the engine/config default is used, not a hard-coded 'Auto'.
+    assert TTSRequest(text="hi").language == ""
+
+
+def test_engine_language_fallback_uses_config_default():
+    from app.config import Settings
+    from app.engine import MockEngine
+    eng = MockEngine(Settings(default_language="Esperanto"))
+    assert eng._language(TTSRequest(text="hi")) == "Esperanto"      # config default
+    assert eng._language(TTSRequest(text="hi", language="French")) == "French"
+
+
 # ---- backend registry & capabilities --------------------------------------- #
 def test_backends_registered():
     for name in ("mock", "qwen", "kokoro", "dia"):
