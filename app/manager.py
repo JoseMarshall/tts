@@ -17,7 +17,12 @@ from .streaming import Synthesizer
 log = logging.getLogger("tts.manager")
 
 # Generic aliases clients may send (e.g. the OpenAI SDK) -> resolved to default.
-_GENERIC_ALIASES = {"", "qwen3-tts", "tts-1", "tts-1-hd", "default", "auto"}
+_GENERIC_ALIASES = {
+    "", "default", "auto",
+    "tts-1", "tts-1-hd",
+    "qwen3-tts", "qwen",
+    "kokoro", "kokoro-82m",
+}
 
 
 class UnknownModelError(KeyError):
@@ -45,10 +50,10 @@ class EngineManager:
         """Return the Synthesizer for ``model``, building it if needed."""
         model_id = self.resolve(model)
 
-        # For the real backend, restrict to the allow-list so a request can't
+        # For real backends, restrict to the allow-list so a request can't
         # trigger an arbitrary multi-gigabyte download. The mock backend has no
         # such cost, so it happily fabricates any requested name.
-        if (self.settings.backend == "qwen"
+        if (self.settings.backend != "mock"
                 and model_id not in set(self.available)):
             raise UnknownModelError(model_id)
 

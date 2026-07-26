@@ -10,6 +10,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.audio import float_to_pcm16, pcm_to_wav, wav_header
+from app.engine import (
+    KokoroEngine,
+    QwenEngine,
+    available_backends,
+    engine_class,
+    kokoro_lang_code,
+)
 from app.main import app
 from app.schemas import TTSRequest
 
@@ -30,6 +37,46 @@ def test_ref_audio_infers_voice_clone():
 def test_explicit_mode_wins():
     req = TTSRequest(text="hi", mode="voice_design", instruct="deep narrator")
     assert req.resolve_mode() == "voice_design"
+
+
+# ---- backend registry & capabilities --------------------------------------- #
+def test_backends_registered():
+    for name in ("mock", "qwen", "kokoro"):
+        assert name in available_backends()
+
+
+def test_engine_class_unknown_raises():
+    with pytest.raises(ValueError):
+        engine_class("does-not-exist")
+
+
+def test_qwen_capabilities():
+    caps = QwenEngine.capabilities()
+    assert caps["backend"] == "qwen"
+    assert "Vivian" in caps["speakers"]
+
+
+def test_kokoro_capabilities():
+    caps = KokoroEngine.capabilities()
+    assert caps["backend"] == "kokoro"
+    assert "af_heart" in caps["speakers"]
+
+
+def test_kokoro_lang_code_mapping():
+    assert kokoro_lang_code("English") == "a"
+    assert kokoro_lang_code("British English") == "b"
+    assert kokoro_lang_code("Japanese") == "j"
+    assert kokoro_lang_code("z") == "z"          # raw code passes through
+    assert kokoro_lang_code(None) == "a"          # default
+    assert kokoro_lang_code("Auto") == "a"
+    with pytest.raises(ValueError):
+        kokoro_lang_code("Klingon")
+
+
+def test_speed_field_validation():
+    assert TTSRequest(text="hi").speed == 1.0
+    with pytest.raises(Exception):   # pydantic ValidationError: speed must be > 0
+        TTSRequest(text="hi", speed=0)
 
 
 # ---- audio helpers --------------------------------------------------------- #
@@ -78,8 +125,12 @@ def test_health(client):
 
 
 def test_voices(client):
+    # Reflects the active backend (mock here: permissive, empty lists).
     r = client.get("/v1/voices")
-    assert "Vivian" in r.json()["speakers"]
+    body = r.json()
+    assert body["backend"] == "mock"
+    assert isinstance(body["speakers"], list)
+    assert isinstance(body["languages"], list)
 
 
 def test_non_streaming_wav(client):
@@ -129,11 +180,14 @@ def test_request_selects_model_header(client):
     assert r.headers["x-model"] == "my-custom-model"
 
 
-def test_language_is_validated(client):
+def test_language_is_backend_specific(client):
+    # Language validation is now the engine's job (mock accepts anything);
+    # the global 422 no longer applies.
     ok = client.post("/v1/tts/stream", json={"text": "bonjour", "language": "French"})
     assert ok.status_code == 200
-    bad = client.post("/v1/tts/stream", json={"text": "hi", "language": "Klingon"})
-    assert bad.status_code == 422  # pydantic validation error
+    anything = client.post("/v1/tts/stream",
+                           json={"text": "hi", "language": "Elvish"})
+    assert anything.status_code == 200  # mock is permissive
 
 
 # ---- websocket ------------------------------------------------------------- #

@@ -19,13 +19,9 @@ from fastapi.responses import Response, StreamingResponse
 
 from .audio import CONTENT_TYPES, pcm_to_wav, wav_header
 from .config import Settings, get_settings
+from .engine import available_backends, engine_class
 from .manager import EngineManager, UnknownModelError
-from .schemas import (
-    LANGUAGES,
-    SPEAKERS,
-    OpenAISpeechRequest,
-    TTSRequest,
-)
+from .schemas import OpenAISpeechRequest, TTSRequest
 from .streaming import Synthesizer
 
 logging.basicConfig(
@@ -38,6 +34,11 @@ log = logging.getLogger("tts")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    if settings.backend not in available_backends():
+        raise RuntimeError(
+            f"Unknown TTS_BACKEND {settings.backend!r}. "
+            f"Available: {available_backends()}"
+        )
     log.info("Starting TTS server (backend=%s, models=%s)",
              settings.backend, settings.model_list)
     app.state.manager = EngineManager(settings)
@@ -47,9 +48,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Qwen3-TTS Server",
-    version="1.1.0",
-    description="Streaming text-to-speech server for Qwen3-TTS models.",
+    title="Multi-backend TTS Server",
+    version="1.2.0",
+    description="Streaming text-to-speech server (Qwen3-TTS, Kokoro-82M, …).",
     lifespan=lifespan,
 )
 
@@ -108,6 +109,7 @@ async def health(
     return {
         "status": "ok",
         "backend": settings.backend,
+        "available_backends": available_backends(),
         "default_model": settings.model_id,
         "models": manager.available,
         "loaded": list(manager._synths.keys()),
@@ -126,8 +128,10 @@ async def models(manager: EngineManager = Depends(get_manager)):
 
 
 @app.get("/v1/voices")
-async def voices():
-    return {"speakers": SPEAKERS, "languages": LANGUAGES}
+async def voices(settings: Settings = Depends(get_settings)):
+    # Reflect the active backend's capabilities. Mock accepts anything, so it
+    # returns empty lists.
+    return engine_class(settings.backend).capabilities()
 
 
 # --------------------------------------------------------------------------- #
@@ -174,7 +178,8 @@ async def openai_speech(
     req = TTSRequest(
         text=body.input,
         language=body.language,
-        speaker=body.voice,
+        speaker=body.voice or None,   # empty -> backend default
+        speed=body.speed,
         instruct=body.instructions,
         model=body.model,
         response_format=body.response_format,

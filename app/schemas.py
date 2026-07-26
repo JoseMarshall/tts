@@ -3,17 +3,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
-
-# Advertised in /v1/voices and validated loosely (the model may support more).
-SPEAKERS = [
-    "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric",
-    "Ryan", "Aiden", "Ono_Anna", "Sohee",
-]
-LANGUAGES = [
-    "Auto", "Chinese", "English", "Japanese", "Korean", "German",
-    "French", "Russian", "Portuguese", "Spanish", "Italian",
-]
+from pydantic import BaseModel, Field
 
 ResponseFormat = Literal["wav", "pcm"]
 VoiceMode = Literal["custom_voice", "voice_design", "voice_clone"]
@@ -22,20 +12,24 @@ VoiceMode = Literal["custom_voice", "voice_design", "voice_clone"]
 class TTSRequest(BaseModel):
     """Native synthesis request.
 
+    Fields are intentionally generic; each backend interprets what it supports
+    and raises for what it doesn't (e.g. Kokoro rejects voice cloning). Query
+    ``GET /v1/voices`` for the active backend's speakers and languages.
+
     The synthesis mode is inferred unless ``mode`` is set explicitly:
       * ``ref_audio`` present -> ``voice_clone``
       * otherwise             -> ``custom_voice`` (using ``speaker``, and
-        ``instruct`` as an optional style modifier)
+        ``instruct`` as an optional style modifier where supported)
 
-    ``voice_design`` (synthesising a voice purely from an ``instruct``
-    description, with no preset speaker) is a capability of the dedicated
-    VoiceDesign checkpoint only, so it is never inferred — request it
-    explicitly with ``mode="voice_design"`` while that model is selected. The
-    CustomVoice model accepts ``instruct`` as a modifier on ``custom_voice``.
+    ``voice_design`` (a voice from an ``instruct`` description alone) is never
+    inferred — request it explicitly with ``mode="voice_design"`` on a backend
+    that provides it.
     """
 
     text: str = Field(..., min_length=1, description="Text to synthesise.")
-    language: str = Field("Auto", description="Language hint or 'Auto'.")
+    language: str = Field(
+        "Auto", description="Language name or code; backend-specific ('Auto' ok)."
+    )
     model: Optional[str] = Field(
         None,
         description="Model id to use. Omit for the server default; must be one "
@@ -46,15 +40,17 @@ class TTSRequest(BaseModel):
     mode: Optional[VoiceMode] = Field(
         None,
         description="Force a synthesis mode. Omit to infer (ref_audio -> "
-                    "voice_clone, else custom_voice). Use 'voice_design' only "
-                    "with a VoiceDesign-capable model.",
+                    "voice_clone, else custom_voice).",
     )
-    # Custom voice
     speaker: Optional[str] = Field(
-        None, description="Preset speaker name (custom-voice mode)."
+        None, description="Preset voice/speaker name (backend default if omitted)."
+    )
+    speed: float = Field(
+        1.0, gt=0, le=4.0,
+        description="Speech-rate multiplier for backends that support it (Kokoro).",
     )
     # Style instruction: a modifier for custom_voice, or the description that
-    # drives voice_design.
+    # drives voice_design (backend-dependent).
     instruct: Optional[str] = Field(
         None, description="Natural-language voice/style instruction."
     )
@@ -69,36 +65,23 @@ class TTSRequest(BaseModel):
 
     response_format: ResponseFormat = "wav"
 
-    @field_validator("language")
-    @classmethod
-    def _check_language(cls, v: str) -> str:
-        if not v:
-            return "Auto"
-        match = {lang.lower(): lang for lang in LANGUAGES}.get(v.lower())
-        if match is None:
-            raise ValueError(
-                f"Unsupported language {v!r}. Supported: {', '.join(LANGUAGES)}"
-            )
-        return match
-
     def resolve_mode(self) -> str:
         if self.mode:
             return self.mode
         if self.ref_audio:
             return "voice_clone"
-        # Note: `instruct` no longer implies voice_design; it modifies
-        # custom_voice. Voice design must be requested explicitly.
+        # `instruct` modifies custom_voice; it does not imply voice_design.
         return "custom_voice"
 
 
 class OpenAISpeechRequest(BaseModel):
-    """Subset of the OpenAI ``/v1/audio/speech`` schema, adapted to Qwen3-TTS."""
+    """Subset of the OpenAI ``/v1/audio/speech`` schema, mapped onto our engines."""
 
-    model: str = "qwen3-tts"
+    model: str = "tts-1"
     input: str = Field(..., min_length=1)
-    voice: str = "Vivian"
-    # OpenAI uses these format names; we map them onto what we can emit.
+    voice: str = ""                       # empty -> backend default
     response_format: Literal["wav", "pcm"] = "wav"
+    speed: float = 1.0
     # Non-standard extras (honoured if supplied):
     language: str = "Auto"
     instructions: Optional[str] = None

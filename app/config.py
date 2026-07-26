@@ -21,9 +21,10 @@ class Settings(BaseSettings):
     )
 
     # ---- Backend selection -------------------------------------------------
-    # "qwen" loads the real Qwen3-TTS model (needs a GPU + the qwen-tts pkg).
-    # "mock" synthesises a placeholder tone so the API can run anywhere.
-    backend: Literal["qwen", "mock"] = "mock"
+    # Any registered engine name: "mock" (placeholder tone, no deps),
+    # "qwen" (Qwen3-TTS), "kokoro" (Kokoro-82M), ... Validated at startup
+    # against the engine registry (see app/engine.py).
+    backend: str = "mock"
 
     # ---- Model loading -----------------------------------------------------
     # ``model_id`` is the default model. ``models`` is a comma-separated
@@ -42,8 +43,10 @@ class Settings(BaseSettings):
     stream_chunk_samples: int = 1200
 
     # ---- Generation defaults ----------------------------------------------
-    default_language: str = "Auto"
-    default_speaker: str = "Vivian"
+    # Empty means "let the active backend pick its own default" (e.g. Qwen ->
+    # Vivian/Auto, Kokoro -> af_heart/American English). Set to pin a default.
+    default_language: str = ""
+    default_speaker: str = ""
 
     # ---- Concurrency -------------------------------------------------------
     # A single model instance is not safe for concurrent generation, so calls
