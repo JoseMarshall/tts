@@ -345,6 +345,8 @@ class KokoroEngine(TTSEngine):
             audio = getattr(result, "audio", None)
             if audio is None and isinstance(result, (tuple, list)):
                 audio = result[-1]
+            if audio is None:      # segment produced no audio (e.g. a pause)
+                continue
             audio = _as_float_mono(audio)
             for s in range(0, len(audio), step):
                 frame = audio[s:s + step]
