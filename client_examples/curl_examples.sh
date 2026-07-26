@@ -23,12 +23,17 @@ curl -s -X POST "$BASE/v1/tts" \
   -o full.wav
 echo "wrote full.wav"
 
-echo "# voice design via instruction"
+echo "# custom voice with a style instruction (works on the CustomVoice model)"
 curl -s -X POST "$BASE/v1/tts/stream" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"Spooky narration.","instruct":"a slow, whispering horror voice"}' \
-  -o design.wav
-echo "wrote design.wav"
+  -d '{"text":"Spooky narration.","speaker":"Dylan","instruct":"a slow, whispering horror voice"}' \
+  -o instruct.wav
+echo "wrote instruct.wav"
+
+# Voice design (a voice from description alone, no preset speaker) needs the
+# dedicated VoiceDesign checkpoint AND an explicit mode. It will 400 on the
+# CustomVoice model:
+#   -d '{"text":"...","mode":"voice_design","instruct":"a deep calm narrator"}'
 
 echo "# OpenAI-compatible endpoint"
 curl -s -X POST "$BASE/v1/audio/speech" \

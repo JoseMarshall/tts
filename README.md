@@ -18,10 +18,15 @@ GPU or the multi-gigabyte model.
   receive audio concurrently, cancel mid-utterance)
 - **Per-request model and language selection** (`model` + `language` fields);
   models are lazily loaded and restricted to an allow-list
-- Three voice modes, selected automatically from the request:
-  - **Custom voice** — a preset `speaker`
-  - **Voice design** — a natural-language `instruct` prompt
+- Three voice modes:
+  - **Custom voice** (default) — a preset `speaker`, with `instruct` as an
+    optional style modifier
   - **Voice cloning** — a `ref_audio` reference (path / URL / base64) + `ref_text`
+  - **Voice design** — a voice from an `instruct` description alone; requires the
+    dedicated VoiceDesign checkpoint and `mode: "voice_design"`
+
+  Mode is inferred (`ref_audio` → cloning, else custom voice) unless you set
+  `mode` explicitly.
 - Serialised model access with bounded queueing (a single model isn't
   concurrency-safe) and backpressure
 - Optional bearer-token auth
@@ -76,8 +81,9 @@ into frames, so the HTTP API behaves identically.
   "text": "Text to speak",          // required
   "model": "Qwen/Qwen3-TTS-...",    // optional; default model if omitted
   "language": "Auto",               // Auto | English | Chinese | Japanese | ...
+  "mode": null,                     // null=infer; or custom_voice|voice_clone|voice_design
   "speaker": "Vivian",              // custom-voice mode
-  "instruct": "a calm, warm tone",  // voice-design mode (optional)
+  "instruct": "a calm, warm tone",  // style modifier (custom voice) / design prompt
   "ref_audio": "https://.../a.wav", // voice-clone mode (optional)
   "ref_text": "transcript",         // required with ref_audio
   "response_format": "wav"          // "wav" | "pcm"
@@ -141,9 +147,12 @@ All settings are environment variables prefixed with `TTS_`; see
 ## Tests
 
 ```bash
-pip install pytest httpx
+pip install -r requirements-dev.txt
 pytest -q
 ```
+
+Tests run against the mock backend and are isolated from your local `.env`
+(see `tests/conftest.py`), so they never load the real model or require a GPU.
 
 ## Docker
 
@@ -162,3 +171,66 @@ docker run --gpus all -p 8000:8000 -e TTS_BACKEND=qwen qwen3-tts-server
   for snappier first-audio; raise it to reduce per-frame cost.
 - **Concurrency:** generation is serialised per process. To serve more load,
   run multiple workers/replicas behind a load balancer, each with its own GPU.
+
+## Troubleshooting
+
+Real issues hit while bringing this up (mostly Windows). See also
+[`docs/deployment.md`](docs/deployment.md#troubleshooting).
+
+### `ModuleNotFoundError: No module named 'torch'` on startup
+Your `.env` has `TTS_BACKEND=qwen`, so the server tries to load the real model,
+which imports `torch`. Either use the mock backend for local dev
+(`TTS_BACKEND=mock`), or install the model deps (`pip install -U torch qwen-tts
+soundfile`) on a CUDA machine.
+
+### PowerShell: `Invoke-WebRequest : A positional parameter cannot be found …`
+In PowerShell, `curl` is an **alias for `Invoke-WebRequest`** and doesn't accept
+curl's `-s`/`-X`/`-d` flags. Use real curl as **`curl.exe`**, or native
+PowerShell:
+
+```powershell
+$body = @{ text = "Hello there"; speaker = "Vivian" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://localhost:8000/v1/tts" -Method Post `
+  -ContentType "application/json" -Body $body -OutFile out.wav
+```
+
+If auth is enabled (`TTS_API_KEYS` set), add
+`-Headers @{ Authorization = "Bearer <key>" }`. Note `Invoke-*` buffers the whole
+response — for *true* streaming from a terminal use `curl.exe -N`, or the Python
+client in `client_examples/`.
+
+### `flash-attn` install fails: `CUDA_HOME environment variable is not set`
+flash-attn compiles CUDA kernels at install time and needs the full CUDA
+Toolkit (`nvcc`) — painful on Windows. **You don't need it.** Set
+`TTS_ATTN_IMPLEMENTATION=sdpa` (PyTorch's built-in attention) and skip the
+install. flash-attn is only an optional throughput optimisation.
+
+### `torch.cuda.is_available()` returns `False`
+You almost certainly installed the **CPU-only** wheel (`pip install torch` on
+Windows defaults to CPU). Check with
+`python -c "import torch; print(torch.__version__, torch.version.cuda)"` — a
+`+cpu` version / `None` CUDA confirms it. Reinstall the CUDA build:
+
+```powershell
+pip uninstall -y torch
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+```
+
+**Blackwell GPUs (RTX 50-series, `sm_120`) need cu128 or newer** — older
+cu118/cu121 wheels lack the kernels and will error at runtime even if
+`is_available()` is `True`. Pick the `cuXXX` index that matches (≤) your driver's
+CUDA version (`nvidia-smi`, top-right).
+
+### `500` — `model … does not support generate_voice_design`
+The **CustomVoice** checkpoint has no voice-design mode; there `instruct` is a
+**style modifier** on custom voice, not a separate mode. This server no longer
+infers voice design from `instruct` — it folds `instruct` into `custom_voice`.
+True voice design (a voice from description alone) needs the dedicated
+**VoiceDesign** checkpoint and an explicit `"mode":"voice_design"`; requesting it
+on a CustomVoice model returns `400`.
+
+### Tests enforce auth / try to load the real model
+Tests are isolated from your `.env` via `tests/conftest.py` (forces
+`TTS_BACKEND=mock`, no auth). If you see `401`s or a slow model load during
+`pytest`, make sure that file is present and you're not overriding `TTS_*` env
+vars in your shell.

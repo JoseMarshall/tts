@@ -19,14 +19,21 @@ them.
 | `text` | string | — | **Required.** Text to synthesise. |
 | `model` | string | server default | Must be an allow-listed model (`GET /v1/models`). Generic aliases (`qwen3-tts`, `tts-1`, `default`) map to the default. |
 | `language` | string | `Auto` | One of `GET /v1/voices`.`languages`; validated (`422` if unknown). |
+| `mode` | string | *(inferred)* | Force a mode: `custom_voice` \| `voice_clone` \| `voice_design`. Omit to infer. |
 | `speaker` | string | `Vivian` | Preset speaker (custom-voice mode). |
-| `instruct` | string | — | Natural-language style prompt (voice-design mode). |
+| `instruct` | string | — | Style modifier for custom voice, or the description for voice design. |
 | `ref_audio` | string | — | Reference audio (path/URL/base64) for cloning. |
 | `ref_text` | string | — | Transcript of `ref_audio` (required with it). |
 | `response_format` | string | `wav` | `wav` or `pcm`. |
 
-**Voice mode** is chosen automatically: `ref_audio` → cloning; else `instruct`
-→ voice design; else `speaker` → custom voice.
+**Voice mode** is inferred unless `mode` is set: `ref_audio` present → cloning;
+otherwise → custom voice (with `instruct` as an optional style modifier).
+
+`voice_design` — synthesising a voice from an `instruct` description with no
+preset speaker — is **only** provided by the dedicated VoiceDesign checkpoint,
+so it is never inferred. Request it explicitly with `"mode":"voice_design"`
+while that model is selected. Asking a CustomVoice model for `voice_design`
+returns `400`.
 
 ### Response
 
