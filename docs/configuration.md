@@ -9,16 +9,16 @@ startup via `app/config.py`.
 ### Backend
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_BACKEND` | `mock` | `mock` (tone generator, no GPU) or `qwen` (real model). |
+| `TTS_BACKEND` | `mock` | Registered engine name: `mock` (tone generator, no deps), `qwen` (Qwen3-TTS, GPU), `kokoro` (Kokoro-82M, CPU/GPU). Validated at startup. |
 
-### Model loading (used when `TTS_BACKEND=qwen`)
+### Model loading (real backends)
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model, preloaded at startup. |
+| `TTS_MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model, preloaded at startup. For Kokoro use `hexgrad/Kokoro-82M`. |
 | `TTS_MODELS` | *(empty)* | Comma-separated **allow-list** of additional models a request may select. The default is always allowed. |
-| `TTS_DEVICE` | `cuda:0` | Torch device (`device_map`). |
-| `TTS_DTYPE` | `bfloat16` | `bfloat16` \| `float16` \| `float32`. |
-| `TTS_ATTN_IMPLEMENTATION` | `flash_attention_2` | Passed to `from_pretrained`. Use `sdpa` if flash-attn isn't installed. |
+| `TTS_DEVICE` | `cuda:0` | Torch device (`device_map`); GPU backends. |
+| `TTS_DTYPE` | `bfloat16` | `bfloat16` \| `float16` \| `float32` (Qwen). |
+| `TTS_ATTN_IMPLEMENTATION` | `sdpa` | Qwen attention backend. `sdpa` needs no build; `flash_attention_2` is an optional speedup. |
 
 ### Audio
 | Variable | Default | Description |

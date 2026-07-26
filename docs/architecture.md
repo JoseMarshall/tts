@@ -40,13 +40,23 @@ Abstract base. The single primitive an engine implements is
 `stream(req) -> Iterator[np.ndarray]`, yielding float32 mono chunks in `[-1, 1]`
 at `sample_rate`. Non-streaming synthesis is just "consume and concatenate".
 
+Engines self-register via the `@register` decorator into a name→class registry;
+`build_engine()` looks up `TTS_BACKEND` there, and `GET /v1/voices` reads each
+class's `capabilities()` (speakers, languages, defaults). Class metadata
+(`NAME`, `SAMPLE_RATE`, `SPEAKERS`, `LANGUAGES`, `DEFAULT_SPEAKER`,
+`DEFAULT_LANGUAGE`) keeps everything else backend-agnostic — see
+[Adding a backend](#adding-a-backend).
+
 - **`MockEngine`** — a dependency-free chord generator whose length scales with
   text length. Lets the whole stack run and be tested without a GPU or model.
 - **`QwenEngine`** — loads a `qwen-tts` model. The **one adaptation point** is
   `QwenEngine._raw_stream`: it tries native `stream=True` generation and falls
   back to full generation re-chunked into frames if the installed library
   doesn't support streaming. Normalisation helpers tolerate the various shapes
-  (batched arrays, `(array, sr)` tuples, int vs float) a library might return.
+  (batched arrays, `(array, sr)` tuples, torch tensors, int vs float).
+- **`KokoroEngine`** — loads Kokoro-82M via `KPipeline` (one pipeline cached per
+  language code). Kokoro yields per text segment, which the engine re-slices
+  into fixed frames. Preset voices only; cloning/design raise `ValueError`→`400`.
 
 ### `Synthesizer` (`streaming.py`)
 Owns one engine plus the concurrency machinery:
@@ -109,10 +119,47 @@ frames mid-utterance.
   isn't known up front. Most players accept this. The non-streaming `/v1/tts`
   writes exact sizes. See [api.md](api.md#audio-formats) for the trade-off.
 
-## Swapping in the real model
+## Adding a backend
 
-Set `TTS_BACKEND=qwen` and install `torch qwen-tts soundfile` on a CUDA box.
-Only `QwenEngine._raw_stream` (and `_method_and_kwargs`) touch the library — if
-a future `qwen-tts` version changes its streaming signature, adapt those and
-nothing else. The fallback path keeps the HTTP/WS API identical even if native
-streaming is unavailable in the installed version.
+Everything except the engine class is model-agnostic, so a new backend is one
+registered `TTSEngine` subclass in `app/engine.py`:
+
+```python
+@register
+class MyEngine(TTSEngine):
+    NAME = "mybackend"          # the TTS_BACKEND value that selects it
+    SAMPLE_RATE = 24000
+    SPEAKERS = [...]            # advertised by GET /v1/voices
+    LANGUAGES = [...]
+    DEFAULT_SPEAKER = "..."
+    DEFAULT_LANGUAGE = "..."
+
+    def __init__(self, settings, model_id=None):
+        super().__init__(settings, model_id)
+        ...                     # load the model; import heavy deps *here*
+
+    def stream(self, req):
+        for chunk in my_model.generate(req.text, voice=self._speaker(req)):
+            yield chunk         # float32 mono numpy at SAMPLE_RATE
+```
+
+Guidelines:
+- Keep heavy imports (`torch`, the model package) **inside `__init__`** so the
+  server and tests run without them when another backend is selected.
+- Use the `self._speaker(req)` / `self._language(req)` helpers — they resolve
+  request value → `TTS_DEFAULT_*` → the engine's own default.
+- Raise `ValueError` for anything the model can't do (unsupported mode, unknown
+  voice/language); the API maps it to `400`.
+- Normalise outputs through `_as_float_mono` (handles torch tensors, int PCM,
+  channel layouts). Emit chunks around `settings.stream_chunk_samples` for
+  smooth streaming; if the model isn't natively streaming, generate fully and
+  slice (see `QwenEngine._raw_stream`'s fallback).
+
+That's it — routing, WAV/PCM framing, the WebSocket protocol, cancellation, the
+allow-list and lazy multi-model loading all work unchanged. Select it with
+`TTS_BACKEND=mybackend`.
+
+### The Qwen adaptation point
+For Qwen specifically, only `QwenEngine._raw_stream` / `_method_and_kwargs` touch
+the `qwen-tts` library; if a future version changes its streaming signature,
+adapt those and nothing else.

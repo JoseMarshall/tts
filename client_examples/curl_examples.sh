@@ -35,6 +35,11 @@ echo "wrote instruct.wav"
 # CustomVoice model:
 #   -d '{"text":"...","mode":"voice_design","instruct":"a deep calm narrator"}'
 
+# Kokoro backend example (run the server with TTS_BACKEND=kokoro):
+#   curl -s -X POST "$BASE/v1/tts/stream" -H 'Content-Type: application/json' \
+#     -d '{"text":"Hello from Kokoro.","speaker":"af_heart","language":"English","speed":1.0}' \
+#     -o kokoro.wav
+
 echo "# OpenAI-compatible endpoint"
 curl -s -X POST "$BASE/v1/audio/speech" \
   -H 'Content-Type: application/json' \

@@ -17,12 +17,13 @@ them.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `text` | string | — | **Required.** Text to synthesise. |
-| `model` | string | server default | Must be an allow-listed model (`GET /v1/models`). Generic aliases (`qwen3-tts`, `tts-1`, `default`) map to the default. |
-| `language` | string | `Auto` | One of `GET /v1/voices`.`languages`; validated (`422` if unknown). |
+| `model` | string | server default | Must be an allow-listed model (`GET /v1/models`). Generic aliases (`qwen3-tts`, `kokoro`, `tts-1`, `default`) map to the default. |
+| `language` | string | `Auto` | Backend-specific name/code (see `GET /v1/voices`). Unsupported values return `400` from the engine. |
 | `mode` | string | *(inferred)* | Force a mode: `custom_voice` \| `voice_clone` \| `voice_design`. Omit to infer. |
-| `speaker` | string | `Vivian` | Preset speaker (custom-voice mode). |
-| `instruct` | string | — | Style modifier for custom voice, or the description for voice design. |
-| `ref_audio` | string | — | Reference audio (path/URL/base64) for cloning. |
+| `speaker` | string | backend default | Preset voice (e.g. `Vivian` for Qwen, `af_heart` for Kokoro). |
+| `speed` | number | `1.0` | Rate multiplier (0–4), for backends that support it (Kokoro). |
+| `instruct` | string | — | Style modifier for custom voice, or the description for voice design (backend-dependent). |
+| `ref_audio` | string | — | Reference audio (path/URL/base64) for cloning (backends that support it). |
 | `ref_text` | string | — | Transcript of `ref_audio` (required with it). |
 | `response_format` | string | `wav` | `wav` or `pcm`. |
 
@@ -109,13 +110,21 @@ Lists selectable models in an OpenAI-shaped envelope.
 
 ## `GET /v1/voices`
 
+Reflects the **active backend's** capabilities. Example (`TTS_BACKEND=qwen`):
+
 ```json
-{"speakers": ["Vivian", "Serena", "..."], "languages": ["Auto", "English", "..."]}
+{
+  "backend": "qwen",
+  "speakers": ["Vivian", "Serena", "Uncle_Fu", "..."],
+  "languages": ["Auto", "Chinese", "English", "..."],
+  "default_speaker": "Vivian",
+  "default_language": "Auto"
+}
 ```
 
-Speakers: `Vivian, Serena, Uncle_Fu, Dylan, Eric, Ryan, Aiden, Ono_Anna, Sohee`.
-Languages: `Auto, Chinese, English, Japanese, Korean, German, French, Russian,
-Portuguese, Spanish, Italian`.
+For `kokoro`, speakers are voices like `af_heart`/`bm_george` and languages are
+`American English`, `Japanese`, … The `mock` backend accepts anything and
+returns empty lists.
 
 ## `GET /health`
 
@@ -123,6 +132,7 @@ Portuguese, Spanish, Italian`.
 {
   "status": "ok",
   "backend": "mock",
+  "available_backends": ["kokoro", "mock", "qwen"],
   "default_model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
   "models": ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"],
   "loaded": ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"],

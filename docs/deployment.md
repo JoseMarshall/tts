@@ -43,6 +43,24 @@ load lazily on first request. If `flash_attention_2` isn't available, set
 > streaming signature, adapt those; the fallback path already keeps the API
 > working even without native streaming.
 
+## Kokoro-82M (`kokoro`) — CPU or GPU
+
+```bash
+pip install -r requirements.txt
+pip install -U kokoro soundfile
+# espeak-ng system package (grapheme->phoneme, esp. non-English):
+#   Windows: winget install eSpeak-NG.eSpeak-NG
+#   Debian/Ubuntu: sudo apt-get install espeak-ng
+#   macOS: brew install espeak-ng
+
+export TTS_BACKEND=kokoro
+export TTS_MODEL_ID=hexgrad/Kokoro-82M
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Kokoro is small (~350 MB) and runs on CPU, though a GPU is faster. It offers
+preset voices only (no cloning/design). Voices/languages: `GET /v1/voices`.
+
 ## Docker
 
 ```bash
@@ -101,4 +119,7 @@ with just `requirements.txt` works.
 | WAV shows wrong/infinite duration | Expected for streamed WAV (open-ended header). Use `/v1/tts` for exact sizes, or `pcm`. |
 | Import error for `qwen_tts`/`torch` | Only needed with `TTS_BACKEND=qwen`; install them, or use `mock`. |
 | flash-attn error at load | Set `TTS_ATTN_IMPLEMENTATION=sdpa`. |
+| `Unknown TTS_BACKEND '…'` at startup | Must be a registered engine (`mock`/`qwen`/`kokoro`). Fix the typo. |
+| Kokoro: espeak error / garbled non-English | Install `espeak-ng`; on Windows set `PHONEMIZER_ESPEAK_LIBRARY` to `libespeak-ng.dll`. |
+| Kokoro: `400` on request | Kokoro is preset-voice only; `voice_clone`/`voice_design` aren't supported. |
 | WS closes immediately (1008) | Auth enabled but key missing/wrong; pass `?api_key=` or the bearer header. |

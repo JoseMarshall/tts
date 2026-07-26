@@ -1,13 +1,19 @@
-# Qwen3-TTS Streaming Server
+# Multi-backend TTS Streaming Server
 
-A FastAPI server that exposes [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice)
-models over HTTP with **low-latency chunked streaming**. Audio starts flowing to
-the client as soon as the model emits its first packet, rather than after the
-whole clip is generated.
+A FastAPI server that exposes text-to-speech models over HTTP with
+**low-latency chunked streaming**. Audio starts flowing to the client as soon as
+the model emits its first packet, rather than after the whole clip is generated.
 
-It supports the model's three voice modes and ships with a dependency-free
-**mock backend** so you can run, test and integrate against the API without a
-GPU or the multi-gigabyte model.
+**Pluggable backends** — pick one with `TTS_BACKEND`:
+
+| Backend | Model | Notes |
+|---|---|---|
+| `mock` | — | Dependency-free tone generator. Runs anywhere; used for dev/CI. |
+| `qwen` | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) | CUDA GPU. Custom voice / cloning / (design checkpoint). |
+| `kokoro` | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | Tiny (~350 MB), CPU or GPU. Preset voices, many languages. |
+
+Adding another model is a self-contained ~40-line engine class plus one
+decorator — see [Adding a backend](#adding-a-backend).
 
 ## Features
 
@@ -16,9 +22,11 @@ GPU or the multi-gigabyte model.
 - `POST /v1/audio/speech` — **OpenAI-compatible** endpoint (works with the OpenAI SDK)
 - `WS /v1/tts/ws` — **bidirectional WebSocket streaming** (send text/control,
   receive audio concurrently, cancel mid-utterance)
-- **Per-request model and language selection** (`model` + `language` fields);
-  models are lazily loaded and restricted to an allow-list
-- Three voice modes:
+- **Pluggable backends** via an engine registry; `GET /v1/voices` and defaults
+  are backend-aware
+- **Per-request model, language, voice and speed** (`model`, `language`,
+  `speaker`, `speed`); models are lazily loaded and restricted to an allow-list
+- Voice modes (where the backend supports them):
   - **Custom voice** (default) — a preset `speaker`, with `instruct` as an
     optional style modifier
   - **Voice cloning** — a `ref_audio` reference (path / URL / base64) + `ref_text`
@@ -52,25 +60,80 @@ python client_examples/stream_client.py "Hello from a streaming server" out.wav
 bash client_examples/curl_examples.sh
 ```
 
-## Running the real model
+## Running a real backend
 
-On a machine with a CUDA GPU:
+### Qwen3-TTS (`qwen`) — CUDA GPU
 
 ```bash
 pip install -r requirements.txt
-pip install -U torch qwen-tts soundfile
+pip install -U torch qwen-tts soundfile   # torch must match your CUDA
 
 export TTS_BACKEND=qwen
-export TTS_DEVICE=cuda:0
+export TTS_MODEL_ID=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-The only place that calls the `qwen-tts` library is
-`QwenEngine._raw_stream` in `app/engine.py`. If the installed library version
-uses a different streaming signature, adapt that one method — the rest of the
-server (framing, streaming, HTTP) is backend-agnostic. If native streaming
-isn't available, it automatically falls back to full generation re-chunked
-into frames, so the HTTP API behaves identically.
+The only place that calls the `qwen-tts` library is `QwenEngine._raw_stream` in
+`app/engine.py`; if a library update changes the streaming signature, adapt that
+one method. Native streaming falls back to full-generation re-chunking if
+unavailable, so the HTTP API is identical either way.
+
+### Kokoro-82M (`kokoro`) — CPU or GPU
+
+```bash
+pip install -r requirements.txt
+pip install -U kokoro soundfile
+# espeak-ng is used for grapheme->phoneme (esp. non-English / OOV words):
+#   Windows: winget install eSpeak-NG.eSpeak-NG
+#   Debian/Ubuntu: sudo apt-get install espeak-ng
+#   macOS: brew install espeak-ng
+
+export TTS_BACKEND=kokoro
+export TTS_MODEL_ID=hexgrad/Kokoro-82M
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Kokoro uses **preset voices** (`speaker`, e.g. `af_heart`, `bm_george`), a
+`language` (name or single-char code — American English, `a`; Japanese, `j`; …),
+and honours `speed`. It has no voice cloning/design, so those requests return
+`400`. List everything with `GET /v1/voices`.
+
+```bash
+curl -s -X POST localhost:8000/v1/tts/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Hello from Kokoro.","speaker":"af_heart","language":"English","speed":1.0}' \
+  -o kokoro.wav
+```
+
+## Adding a backend
+
+Everything above the engine layer (routing, streaming, WebSocket, manager,
+audio framing) is model-agnostic. A new backend is one registered `TTSEngine`
+subclass in `app/engine.py`:
+
+```python
+@register
+class MyEngine(TTSEngine):
+    NAME = "mybackend"              # the TTS_BACKEND value that selects it
+    SAMPLE_RATE = 24000
+    SPEAKERS = ["..."]             # advertised by GET /v1/voices
+    LANGUAGES = ["..."]
+    DEFAULT_SPEAKER = "..."
+    DEFAULT_LANGUAGE = "..."
+
+    def __init__(self, settings, model_id=None):
+        super().__init__(settings, model_id)
+        ...                         # load the model; import heavy deps here
+
+    def stream(self, req):          # the only required method
+        for chunk in my_model.generate(req.text, voice=self._speaker(req)):
+            yield chunk             # float32 mono numpy at SAMPLE_RATE
+```
+
+`stream()` is the sole primitive — non-streaming, WAV/PCM framing, WebSocket,
+and cancellation all come for free. Raise `ValueError` for anything the model
+can't do (it maps to `400`). The registry auto-discovers it via `@register`;
+select it with `TTS_BACKEND=mybackend`.
 
 ## API
 
@@ -80,9 +143,10 @@ into frames, so the HTTP API behaves identically.
 {
   "text": "Text to speak",          // required
   "model": "Qwen/Qwen3-TTS-...",    // optional; default model if omitted
-  "language": "Auto",               // Auto | English | Chinese | Japanese | ...
+  "language": "Auto",               // backend-specific name/code (see /v1/voices)
   "mode": null,                     // null=infer; or custom_voice|voice_clone|voice_design
-  "speaker": "Vivian",              // custom-voice mode
+  "speaker": "Vivian",              // preset voice; backend default if omitted
+  "speed": 1.0,                     // rate multiplier (backends that support it)
   "instruct": "a calm, warm tone",  // style modifier (custom voice) / design prompt
   "ref_audio": "https://.../a.wav", // voice-clone mode (optional)
   "ref_text": "transcript",         // required with ref_audio
@@ -90,8 +154,9 @@ into frames, so the HTTP API behaves identically.
 }
 ```
 
-`GET /v1/models` lists the selectable model ids. `language` is validated against
-the supported set (see `GET /v1/voices`); an unsupported value returns `422`.
+`GET /v1/models` lists selectable model ids; `GET /v1/voices` lists the **active
+backend's** speakers and languages. Speaker/language validity is backend-specific
+— an unsupported value (or an unsupported `mode`) returns `400`.
 
 - `wav` streams a WAV header followed by 16-bit PCM frames.
 - `pcm` streams raw little-endian 16-bit mono PCM. The sample rate is returned
@@ -135,10 +200,11 @@ All settings are environment variables prefixed with `TTS_`; see
 
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_BACKEND` | `mock` | `mock` or `qwen` |
-| `TTS_MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model |
+| `TTS_BACKEND` | `mock` | Engine to load: `mock`, `qwen`, `kokoro`, … |
+| `TTS_MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model (set to `hexgrad/Kokoro-82M` for Kokoro) |
 | `TTS_MODELS` | *(empty)* | Extra selectable models (comma-separated allow-list) |
-| `TTS_DEVICE` | `cuda:0` | Torch device for the real model |
+| `TTS_DEVICE` | `cuda:0` | Torch device (GPU backends) |
+| `TTS_DEFAULT_SPEAKER` / `TTS_DEFAULT_LANGUAGE` | *(empty)* | Empty = backend's own default |
 | `TTS_SAMPLE_RATE` | `24000` | Output sample rate (Hz) |
 | `TTS_STREAM_CHUNK_SAMPLES` | `1200` | Samples per streamed frame (~50 ms) |
 | `TTS_MAX_QUEUE` | `32` | Max in-flight requests before `503` |
@@ -228,6 +294,23 @@ infers voice design from `instruct` — it folds `instruct` into `custom_voice`.
 True voice design (a voice from description alone) needs the dedicated
 **VoiceDesign** checkpoint and an explicit `"mode":"voice_design"`; requesting it
 on a CustomVoice model returns `400`.
+
+### Kokoro: `RuntimeError: espeak … not installed` or garbled non-English audio
+Kokoro's grapheme→phoneme step uses **espeak-ng** (especially for non-English
+and out-of-vocabulary words). Install the system package (`winget install
+eSpeak-NG.eSpeak-NG` / `apt-get install espeak-ng` / `brew install espeak-ng`).
+On Windows you may also need to point at the DLL, e.g.
+`setx PHONEMIZER_ESPEAK_LIBRARY "C:\Program Files\eSpeak NG\libespeak-ng.dll"`.
+
+### Kokoro: `400` on a request
+Kokoro only does preset voices (`custom_voice`). `voice_clone` / `voice_design`
+(via `ref_audio` or `mode`) aren't supported and return `400`. Also make sure
+`speaker` is a valid Kokoro voice and `language` a supported name/code — see
+`GET /v1/voices`.
+
+### `Unknown TTS_BACKEND '…'` at startup
+`TTS_BACKEND` must be a registered engine name — `mock`, `qwen`, or `kokoro`
+(the error lists the available ones). Check for typos in `.env`/env vars.
 
 ### Tests enforce auth / try to load the real model
 Tests are isolated from your `.env` via `tests/conftest.py` (forces

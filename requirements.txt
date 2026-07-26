@@ -6,12 +6,17 @@ pydantic-settings>=2.3
 python-multipart>=0.0.9
 numpy>=1.26
 
-# --- Model backend (install on a machine with a CUDA GPU) ---
-# These are only required when TTS_BACKEND=qwen. The default "mock"
-# backend needs none of them, so the server runs anywhere for testing.
+# --- Model backends (install only what you use) ---
+# The default "mock" backend needs none of these, so the server runs anywhere
+# for testing. Install the deps for whichever real backend you select.
 #
-#   pip install -U qwen-tts torch soundfile
+# Qwen3-TTS  (TTS_BACKEND=qwen)  -- needs a CUDA GPU:
+#   pip install -U torch qwen-tts soundfile
+#   # torch build must match your CUDA (e.g. --index-url .../whl/cu128)
 #
-# torch>=2.3            # match your CUDA version
-# qwen-tts>=0.1
-# soundfile>=0.12       # only needed to decode uploaded reference audio
+# Kokoro-82M (TTS_BACKEND=kokoro) -- runs on CPU or GPU, ~350 MB:
+#   pip install -U kokoro soundfile
+#   # also install the espeak-ng system package for full G2P / non-English:
+#   #   Windows: winget install eSpeak-NG.eSpeak-NG   (or the MSI release)
+#   #   Debian/Ubuntu: sudo apt-get install espeak-ng
+#   #   macOS: brew install espeak-ng
