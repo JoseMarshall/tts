@@ -16,15 +16,22 @@ LANGUAGES = [
 ]
 
 ResponseFormat = Literal["wav", "pcm"]
+VoiceMode = Literal["custom_voice", "voice_design", "voice_clone"]
 
 
 class TTSRequest(BaseModel):
     """Native synthesis request.
 
-    Exactly one voice source is used, chosen in this order of precedence:
-      1. ``ref_audio`` present  -> voice cloning
-      2. ``instruct`` present   -> voice design
-      3. otherwise              -> custom voice from ``speaker``
+    The synthesis mode is inferred unless ``mode`` is set explicitly:
+      * ``ref_audio`` present -> ``voice_clone``
+      * otherwise             -> ``custom_voice`` (using ``speaker``, and
+        ``instruct`` as an optional style modifier)
+
+    ``voice_design`` (synthesising a voice purely from an ``instruct``
+    description, with no preset speaker) is a capability of the dedicated
+    VoiceDesign checkpoint only, so it is never inferred — request it
+    explicitly with ``mode="voice_design"`` while that model is selected. The
+    CustomVoice model accepts ``instruct`` as a modifier on ``custom_voice``.
     """
 
     text: str = Field(..., min_length=1, description="Text to synthesise.")
@@ -35,11 +42,19 @@ class TTSRequest(BaseModel):
                     "of the allow-listed models (see GET /v1/models).",
     )
 
+    # Explicit mode override; inferred when omitted (see class docstring).
+    mode: Optional[VoiceMode] = Field(
+        None,
+        description="Force a synthesis mode. Omit to infer (ref_audio -> "
+                    "voice_clone, else custom_voice). Use 'voice_design' only "
+                    "with a VoiceDesign-capable model.",
+    )
     # Custom voice
     speaker: Optional[str] = Field(
         None, description="Preset speaker name (custom-voice mode)."
     )
-    # Voice design
+    # Style instruction: a modifier for custom_voice, or the description that
+    # drives voice_design.
     instruct: Optional[str] = Field(
         None, description="Natural-language voice/style instruction."
     )
@@ -66,11 +81,13 @@ class TTSRequest(BaseModel):
             )
         return match
 
-    def mode(self) -> str:
+    def resolve_mode(self) -> str:
+        if self.mode:
+            return self.mode
         if self.ref_audio:
             return "voice_clone"
-        if self.instruct:
-            return "voice_design"
+        # Note: `instruct` no longer implies voice_design; it modifies
+        # custom_voice. Voice design must be requested explicitly.
         return "custom_voice"
 
 

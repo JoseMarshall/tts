@@ -107,7 +107,7 @@ class QwenEngine(TTSEngine):
 
     def _method_and_kwargs(self, req: TTSRequest):
         """Pick the qwen-tts method and kwargs for the request's mode."""
-        mode = req.mode()
+        mode = req.resolve_mode()
         lang = req.language or self.settings.default_language
         if mode == "voice_clone":
             return self.model.generate_voice_clone, dict(

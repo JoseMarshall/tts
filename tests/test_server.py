@@ -11,6 +11,25 @@ from fastapi.testclient import TestClient
 
 from app.audio import float_to_pcm16, pcm_to_wav, wav_header
 from app.main import app
+from app.schemas import TTSRequest
+
+
+# ---- voice-mode resolution ------------------------------------------------- #
+def test_instruct_does_not_imply_voice_design():
+    # instruct alone must fold into custom_voice (the CustomVoice model has no
+    # voice_design); it must never auto-route to voice_design.
+    req = TTSRequest(text="hi", instruct="a warm calm tone")
+    assert req.resolve_mode() == "custom_voice"
+
+
+def test_ref_audio_infers_voice_clone():
+    req = TTSRequest(text="hi", ref_audio="ref.wav", ref_text="hello")
+    assert req.resolve_mode() == "voice_clone"
+
+
+def test_explicit_mode_wins():
+    req = TTSRequest(text="hi", mode="voice_design", instruct="deep narrator")
+    assert req.resolve_mode() == "voice_design"
 
 
 # ---- audio helpers --------------------------------------------------------- #

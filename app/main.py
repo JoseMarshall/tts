@@ -141,6 +141,9 @@ async def tts(req: TTSRequest, manager: EngineManager = Depends(get_manager)):
         pcm = await synth.synthesize_bytes(req)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        # e.g. the model doesn't support the requested mode.
+        raise HTTPException(status_code=400, detail=str(exc))
     body = pcm_to_wav(pcm, synth.sample_rate) if req.response_format == "wav" else pcm
     return Response(
         content=body,
