@@ -32,8 +32,10 @@ class TTSRequest(BaseModel):
     )
     model: Optional[str] = Field(
         None,
-        description="Model id to use. Omit for the server default; must be one "
-                    "of the allow-listed models (see GET /v1/models).",
+        description="Which model/backend to use. Either a backend name "
+                    "(e.g. 'qwen', 'kokoro', 'dia') or a model id "
+                    "(e.g. 'hexgrad/Kokoro-82M'). Omit for the server default. "
+                    "Must be selectable — see GET /v1/models.",
     )
 
     # Explicit mode override; inferred when omitted (see class docstring).

@@ -21,20 +21,27 @@ class Settings(BaseSettings):
     )
 
     # ---- Backend selection -------------------------------------------------
-    # Any registered engine name: "mock" (placeholder tone, no deps),
-    # "qwen" (Qwen3-TTS), "kokoro" (Kokoro-82M), ... Validated at startup
-    # against the engine registry (see app/engine.py).
+    # ``backend`` is the DEFAULT engine used when a request doesn't select one.
+    # ``backends`` additionally enables other engines so a CLIENT can pick them
+    # per request via the ``model`` field (by backend name, e.g. model="kokoro",
+    # or by a model id). Comma-separated; the default backend is always enabled.
+    # Any registered engine name: "mock", "qwen", "kokoro", "dia", …
+    #   e.g. TTS_BACKEND=qwen  TTS_BACKENDS=kokoro,dia
     backend: str = "mock"
+    backends: str = ""
 
     # ---- Model loading -----------------------------------------------------
-    # ``model_id`` is the default model. ``models`` is a comma-separated
-    # allowlist of additional model ids a request may select (the default is
-    # always allowed). Requesting a model outside this set returns 400.
-    model_id: str = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+    # ``model_id`` is the default model for the default backend. Empty -> the
+    # default backend's own default model (e.g. Kokoro -> hexgrad/Kokoro-82M).
+    # ``models`` is a comma-separated allow-list of ADDITIONAL selectable models,
+    # each "backend:model_id" (or "model_id" for the default backend), e.g.
+    #   TTS_MODELS=qwen:Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice,kokoro:hexgrad/Kokoro-82M
+    # Requesting a model outside the catalog returns 400.
+    model_id: str = ""
     models: str = ""
     device: str = "cuda:0"
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
-    attn_implementation: str = "flash_attention_2"
+    attn_implementation: str = "sdpa"
 
     # ---- Audio -------------------------------------------------------------
     sample_rate: int = 24000
@@ -63,14 +70,12 @@ class Settings(BaseSettings):
         return {k.strip() for k in self.api_keys.split(",") if k.strip()}
 
     @property
-    def model_list(self) -> list[str]:
-        """The default model followed by any extra allow-listed models."""
-        ids = [m.strip() for m in self.models.split(",") if m.strip()]
-        result = [self.model_id]
-        for m in ids:
-            if m not in result:
-                result.append(m)
-        return result
+    def extra_backends(self) -> list[str]:
+        return [b.strip() for b in self.backends.split(",") if b.strip()]
+
+    @property
+    def model_entries(self) -> list[str]:
+        return [m.strip() for m in self.models.split(",") if m.strip()]
 
 
 @lru_cache

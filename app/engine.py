@@ -30,6 +30,7 @@ Backends bundled here:
 * ``MockEngine``   — dependency-free tone generator (no GPU / no downloads).
 * ``QwenEngine``   — Qwen3-TTS via the ``qwen-tts`` package.
 * ``KokoroEngine`` — Kokoro-82M via the ``kokoro`` package.
+* ``DiaEngine``    — Dia-1.6B dialogue model via the ``dia`` package.
 """
 from __future__ import annotations
 
@@ -68,13 +69,20 @@ def engine_class(name: str) -> type["TTSEngine"]:
         return _REGISTRY[name]
     except KeyError:
         raise ValueError(
-            f"Unknown TTS_BACKEND {name!r}. Available: {available_backends()}"
+            f"Unknown backend {name!r}. Available: {available_backends()}"
         )
+
+
+def engine_default_model(name: str) -> str:
+    """The canonical model id for a backend (used when a client selects by
+    backend name, e.g. model='kokoro')."""
+    return engine_class(name).DEFAULT_MODEL or name
 
 
 class TTSEngine(abc.ABC):
     # ---- backend metadata (override in subclasses) ------------------------ #
     NAME: str = ""
+    DEFAULT_MODEL: str = ""                  # canonical model id for this backend
     SAMPLE_RATE: int | None = None          # None -> use settings.sample_rate
     SPEAKERS: list[str] = []
     LANGUAGES: list[str] = []
@@ -130,6 +138,7 @@ class MockEngine(TTSEngine):
     """
 
     NAME = "mock"
+    DEFAULT_MODEL = "mock"
 
     def stream(self, req: TTSRequest) -> Iterator[np.ndarray]:
         sr = self.sample_rate
@@ -154,6 +163,7 @@ class MockEngine(TTSEngine):
 @register
 class QwenEngine(TTSEngine):
     NAME = "qwen"
+    DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     SAMPLE_RATE = 24000
     DEFAULT_SPEAKER = "Vivian"
     DEFAULT_LANGUAGE = "Auto"
@@ -278,6 +288,7 @@ def kokoro_lang_code(language: str | None, default: str = "a") -> str:
 @register
 class KokoroEngine(TTSEngine):
     NAME = "kokoro"
+    DEFAULT_MODEL = "hexgrad/Kokoro-82M"
     SAMPLE_RATE = 24000
     DEFAULT_SPEAKER = "af_heart"
     DEFAULT_LANGUAGE = "a"
@@ -339,6 +350,67 @@ class KokoroEngine(TTSEngine):
                 frame = audio[s:s + step]
                 if frame.size:
                     yield frame
+
+
+# --------------------------------------------------------------------------- #
+# Dia-1.6B backend (nari-labs)
+# --------------------------------------------------------------------------- #
+@register
+class DiaEngine(TTSEngine):
+    """Dia is a dialogue TTS model: speakers are marked inline with [S1]/[S2]
+    tags (and non-verbals like ``(laughs)``), so there are no preset voices.
+    It supports voice cloning via an audio prompt, outputs 44.1 kHz, and is not
+    natively streaming — we generate the clip and re-chunk it into frames.
+    """
+
+    NAME = "dia"
+    DEFAULT_MODEL = "nari-labs/Dia-1.6B"
+    SAMPLE_RATE = 44100
+    DEFAULT_LANGUAGE = "English"
+    LANGUAGES = ["English"]
+    SPEAKERS: list[str] = []   # none; use [S1]/[S2] tags in the text
+
+    def __init__(self, settings: Settings, model_id: str | None = None):
+        super().__init__(settings, model_id)
+        from dia.model import Dia  # heavy import, kept local
+
+        # Dia takes a string compute dtype; our settings.dtype already matches.
+        self.model = Dia.from_pretrained(
+            self.model_id, compute_dtype=settings.dtype or "float16"
+        )
+
+    def warmup(self) -> None:
+        try:
+            list(self.stream(TTSRequest(text="[S1] Hello. [S2] Hi there.")))
+            log.info("Warmup complete.")
+        except Exception:  # pragma: no cover
+            log.exception("Warmup failed (continuing anyway).")
+
+    def stream(self, req: TTSRequest) -> Iterator[np.ndarray]:
+        mode = req.resolve_mode()
+        if mode == "voice_design":
+            raise ValueError(
+                "Dia has no voice_design mode. Use [S1]/[S2] dialogue tags, "
+                "or voice_clone with a reference audio prompt."
+            )
+
+        text = req.text
+        kwargs: dict = {}
+        if mode == "voice_clone":
+            if not req.ref_audio:
+                raise ValueError("voice_clone requires 'ref_audio' for Dia.")
+            kwargs["audio_prompt"] = req.ref_audio
+            # Dia clones best when the reference transcript prefixes the target.
+            if req.ref_text:
+                text = f"{req.ref_text}\n{req.text}"
+
+        audio = self.model.generate(text, verbose=False, **kwargs)
+        audio = _as_float_mono(audio)
+        step = self.settings.stream_chunk_samples
+        for s in range(0, len(audio), step):
+            frame = audio[s:s + step]
+            if frame.size:
+                yield frame
 
 
 # --------------------------------------------------------------------------- #

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.audio import float_to_pcm16, pcm_to_wav, wav_header
 from app.engine import (
+    DiaEngine,
     KokoroEngine,
     QwenEngine,
     available_backends,
@@ -41,7 +42,7 @@ def test_explicit_mode_wins():
 
 # ---- backend registry & capabilities --------------------------------------- #
 def test_backends_registered():
-    for name in ("mock", "qwen", "kokoro"):
+    for name in ("mock", "qwen", "kokoro", "dia"):
         assert name in available_backends()
 
 
@@ -60,6 +61,52 @@ def test_kokoro_capabilities():
     caps = KokoroEngine.capabilities()
     assert caps["backend"] == "kokoro"
     assert "af_heart" in caps["speakers"]
+
+
+def test_dia_capabilities():
+    caps = DiaEngine.capabilities()
+    assert caps["backend"] == "dia"
+    assert caps["speakers"] == []          # dialogue tags, no preset voices
+    assert DiaEngine.SAMPLE_RATE == 44100   # Dia outputs 44.1 kHz
+
+
+# ---- multi-backend routing (EngineManager.resolve) ------------------------- #
+def _manager():
+    from app.config import Settings
+    from app.manager import EngineManager
+    # Default backend mock, plus qwen/kokoro/dia enabled for selection.
+    return EngineManager(Settings(backend="mock", model_id="",
+                                  backends="qwen,kokoro,dia", api_keys=""))
+
+
+def test_resolve_by_backend_name():
+    from app.manager import ModelSpec
+    mgr = _manager()
+    assert mgr.resolve("kokoro") == ModelSpec("kokoro", "hexgrad/Kokoro-82M")
+    assert mgr.resolve("dia").backend == "dia"
+    assert mgr.resolve("qwen").backend == "qwen"
+
+
+def test_resolve_by_model_id():
+    mgr = _manager()
+    spec = mgr.resolve("hexgrad/Kokoro-82M")
+    assert (spec.backend, spec.model_id) == ("kokoro", "hexgrad/Kokoro-82M")
+
+
+def test_resolve_default_and_aliases():
+    mgr = _manager()
+    assert mgr.resolve(None) == mgr.default_spec
+    assert mgr.resolve("default") == mgr.default_spec
+    assert mgr.default_spec.backend == "mock"
+
+
+def test_resolve_unknown_model_when_not_permissive():
+    from app.config import Settings
+    from app.manager import EngineManager, UnknownModelError
+    # Default backend qwen (not mock) -> unknown ids are rejected.
+    mgr = EngineManager(Settings(backend="qwen", model_id="qwen", backends=""))
+    with pytest.raises(UnknownModelError):
+        mgr.resolve("nari-labs/Dia-1.6B")   # dia not enabled here
 
 
 def test_kokoro_lang_code_mapping():

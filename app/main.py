@@ -39,10 +39,12 @@ async def lifespan(app: FastAPI):
             f"Unknown TTS_BACKEND {settings.backend!r}. "
             f"Available: {available_backends()}"
         )
-    log.info("Starting TTS server (backend=%s, models=%s)",
-             settings.backend, settings.model_list)
-    app.state.manager = EngineManager(settings)
-    await app.state.manager.preload_default()
+    manager = EngineManager(settings)
+    app.state.manager = manager
+    log.info("Starting TTS server (default=%s, backends=%s, catalog=%s)",
+             manager.default_spec.key, manager.enabled_backends,
+             [s.key for s in manager.catalog])
+    await manager.preload_default()
     yield
     log.info("Shutting down.")
 
@@ -108,30 +110,43 @@ async def health(
 ):
     return {
         "status": "ok",
-        "backend": settings.backend,
-        "available_backends": available_backends(),
-        "default_model": settings.model_id,
-        "models": manager.available,
+        "default_backend": settings.backend,
+        "default_model": manager.default_model,
+        "enabled_backends": manager.enabled_backends,
+        "installed_backends": available_backends(),
+        "catalog": [{"id": s.model_id, "backend": s.backend} for s in manager.catalog],
         "loaded": list(manager._synths.keys()),
-        "sample_rate": settings.sample_rate,
     }
 
 
 @app.get("/v1/models")
 async def models(manager: EngineManager = Depends(get_manager)):
-    # OpenAI-shaped list so tooling that expects it keeps working.
+    # OpenAI-shaped list, enriched with backend + selectable aliases so a client
+    # can discover what to put in the request's "model" field.
+    data = [{"id": s.model_id, "object": "model", "backend": s.backend}
+            for s in manager.catalog]
     return {
         "object": "list",
-        "data": [{"id": m, "object": "model"} for m in manager.available],
+        "data": data,
         "default": manager.default_model,
+        "backends": manager.enabled_backends,  # each selectable as model="<name>"
     }
 
 
 @app.get("/v1/voices")
-async def voices(settings: Settings = Depends(get_settings)):
-    # Reflect the active backend's capabilities. Mock accepts anything, so it
-    # returns empty lists.
-    return engine_class(settings.backend).capabilities()
+async def voices(
+    model: str | None = None,
+    manager: EngineManager = Depends(get_manager),
+):
+    # Capabilities depend on the model's backend. Defaults to the default model;
+    # pass ?model=<id-or-backend> for a specific one.
+    try:
+        spec = manager.resolve(model)
+    except UnknownModelError:
+        raise HTTPException(status_code=400, detail=f"Unknown model {model!r}")
+    caps = engine_class(spec.backend).capabilities()
+    caps["model"] = spec.model_id
+    return caps
 
 
 # --------------------------------------------------------------------------- #
