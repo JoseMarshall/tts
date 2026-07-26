@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.wav
+.pytest_cache/
+.vscode/
+.cursor/
+.DS_Store
+.idea/
+.claude/
+.env
+.env.local
+.env.development
+.env.development.local
+.env.test.local
+.env.production
+.env.production.local
