@@ -40,6 +40,11 @@ class Synthesizer:
     def model_id(self) -> str:
         return self.engine.model_id
 
+    @property
+    def at_capacity(self) -> bool:
+        """True if the generation queue is full (used for admission control)."""
+        return self._inflight >= self.settings.max_queue
+
     def _run_blocking(
         self, req: TTSRequest, q: "queue.Queue",
         cancel: "threading.Event | None",

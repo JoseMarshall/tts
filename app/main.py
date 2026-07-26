@@ -175,6 +175,10 @@ async def tts(req: TTSRequest, manager: EngineManager = Depends(get_manager)):
 async def tts_stream(req: TTSRequest, manager: EngineManager = Depends(get_manager)):
     """Chunked streaming synthesis; audio starts arriving immediately."""
     synth = await resolve_synth(manager, req.model)
+    # Admission control BEFORE the response starts — once StreamingResponse is
+    # returned the status/headers are already sent and can't become a 503.
+    if synth.at_capacity:
+        raise HTTPException(status_code=503, detail="server busy: queue is full")
     return StreamingResponse(
         synth.stream_response(req, req.response_format),
         media_type=CONTENT_TYPES[req.response_format],
@@ -200,6 +204,8 @@ async def openai_speech(
         response_format=body.response_format,
     )
     synth = await resolve_synth(manager, req.model)
+    if synth.at_capacity:
+        raise HTTPException(status_code=503, detail="server busy: queue is full")
     return StreamingResponse(
         synth.stream_response(req, req.response_format),
         media_type=CONTENT_TYPES[req.response_format],
