@@ -9,13 +9,14 @@ startup via `app/config.py`.
 ### Backend
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_BACKEND` | `mock` | Registered engine name: `mock` (tone generator, no deps), `qwen` (Qwen3-TTS, GPU), `kokoro` (Kokoro-82M, CPU/GPU). Validated at startup. |
+| `TTS_BACKEND` | `mock` | **Default** engine: `mock`, `qwen` (Qwen3-TTS, GPU), `kokoro` (Kokoro-82M, CPU/GPU), `dia` (Dia-1.6B, GPU). Validated at startup. |
+| `TTS_BACKENDS` | *(empty)* | Comma-separated extra backends clients may select **by name** (default backend always enabled). |
 
 ### Model loading (real backends)
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model, preloaded at startup. For Kokoro use `hexgrad/Kokoro-82M`. |
-| `TTS_MODELS` | *(empty)* | Comma-separated **allow-list** of additional models a request may select. The default is always allowed. |
+| `TTS_MODEL_ID` | *(empty)* | Default model for the default backend. Empty = that backend's own default (e.g. `hexgrad/Kokoro-82M`). |
+| `TTS_MODELS` | *(empty)* | Comma-separated **allow-list** of extra selectable models, each `backend:model_id`. |
 | `TTS_DEVICE` | `cuda:0` | Torch device (`device_map`); GPU backends. |
 | `TTS_DTYPE` | `bfloat16` | `bfloat16` \| `float16` \| `float32` (Qwen). |
 | `TTS_ATTN_IMPLEMENTATION` | `sdpa` | Qwen attention backend. `sdpa` needs no build; `flash_attention_2` is an optional speedup. |
@@ -44,21 +45,34 @@ startup via `app/config.py`.
 | `TTS_PORT` | `8000` | Bind port. |
 | `TTS_API_KEYS` | *(empty)* | Comma-separated bearer tokens. Empty = auth disabled. |
 
-## Model selection & allow-listing
+## Backends & model selection
 
-- A request selects a model with the `model` field (REST/OpenAI body, or WS
-  `config`/`synthesize`). Omitting it uses `TTS_MODEL_ID`.
-- Generic aliases — `qwen3-tts`, `tts-1`, `tts-1-hd`, `default`, `auto`, and the
-  empty string — resolve to the default model. This keeps OpenAI clients working
-  unchanged.
-- With `TTS_BACKEND=qwen`, any non-alias model must appear in `model_list`
-  (default + `TTS_MODELS`), otherwise the request gets `400`. This prevents a
-  request from triggering an arbitrary multi-gigabyte download.
-- Extra models are **loaded lazily** on first use and then cached. Each loaded
-  model consumes GPU memory — only allow-list what fits.
-- With `TTS_BACKEND=mock`, any model name is accepted (nothing is downloaded);
-  the chosen name is echoed in the `X-Model` header / `start` message, which is
-  handy for testing client model-selection logic.
+A single server can host several backends; the **client** picks one per request.
+
+- **Default backend/model:** `TTS_BACKEND` + `TTS_MODEL_ID` (empty `TTS_MODEL_ID`
+  → that backend's own default, e.g. `kokoro` → `hexgrad/Kokoro-82M`). Used when
+  a request omits `model`.
+- **Enabling more backends for clients:** `TTS_BACKENDS=kokoro,dia` makes those
+  selectable by name. The default backend is always enabled.
+- **Adding specific models:** `TTS_MODELS`, comma-separated, each
+  `backend:model_id` (a bare `model_id` uses the default backend; a bare
+  `backend` means that backend's default model).
+
+A request's `model` field selects by:
+
+1. **backend name** (`"kokoro"`, `"dia"`, `"qwen"`) → that backend's default model;
+2. **model id** (`"hexgrad/Kokoro-82M"`) present in the catalog;
+3. **`backend:model_id`** for an enabled backend + catalogued id;
+4. omitted / generic alias (`default`, `auto`, `tts-1`, …) → the default model.
+
+Anything else returns `400`, so a request can't trigger an arbitrary
+multi-gigabyte download. Each selected model is **loaded lazily** on first use
+and cached (mind GPU memory when enabling several large models). `GET /v1/models`
+lists what's selectable; `GET /v1/voices?model=…` shows a specific model's voices.
+
+With `TTS_BACKEND=mock`, any model name is accepted (nothing is downloaded) and
+echoed in the `X-Model` header / WS `start` message — handy for testing
+client-side model-selection logic.
 
 ## Authentication
 
@@ -73,9 +87,12 @@ in front for anything public).
 ## Example `.env`
 
 ```dotenv
+# Default to Qwen, but also let clients pick Kokoro or Dia per request.
 TTS_BACKEND=qwen
+TTS_BACKENDS=kokoro,dia
 TTS_MODEL_ID=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
-TTS_MODELS=Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice
+# optional extra specific models:
+# TTS_MODELS=kokoro:hexgrad/Kokoro-82M
 TTS_DEVICE=cuda:0
 TTS_DTYPE=bfloat16
 TTS_STREAM_CHUNK_SAMPLES=1200

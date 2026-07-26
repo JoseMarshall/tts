@@ -17,7 +17,7 @@ them.
 | Field | Type | Default | Notes |
 |---|---|---|---|
 | `text` | string | — | **Required.** Text to synthesise. |
-| `model` | string | server default | Must be an allow-listed model (`GET /v1/models`). Generic aliases (`qwen3-tts`, `kokoro`, `tts-1`, `default`) map to the default. |
+| `model` | string | server default | Selects the backend/model: a **backend name** (`qwen`, `kokoro`, `dia`) → that backend's default model, or a **model id** (`hexgrad/Kokoro-82M`). Must be selectable (`GET /v1/models`). Generic aliases (`default`, `auto`, `tts-1`) → the server default. |
 | `language` | string | `Auto` | Backend-specific name/code (see `GET /v1/voices`). Unsupported values return `400` from the engine. |
 | `mode` | string | *(inferred)* | Force a mode: `custom_voice` \| `voice_clone` \| `voice_design`. Omit to infer. |
 | `speaker` | string | backend default | Preset voice (e.g. `Vivian` for Qwen, `af_heart` for Kokoro). |
@@ -98,23 +98,32 @@ with client.audio.speech.with_streaming_response.create(
 
 ## `GET /v1/models`
 
-Lists selectable models in an OpenAI-shaped envelope.
+Lists selectable models (with their backend) in an OpenAI-shaped envelope. Each
+`data[].id`, and each name in `backends`, is a valid value for a request's
+`model` field.
 
 ```json
 {
   "object": "list",
-  "data": [{"id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "object": "model"}],
-  "default": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+  "data": [
+    {"id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "object": "model", "backend": "qwen"},
+    {"id": "hexgrad/Kokoro-82M", "object": "model", "backend": "kokoro"},
+    {"id": "nari-labs/Dia-1.6B", "object": "model", "backend": "dia"}
+  ],
+  "default": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  "backends": ["dia", "kokoro", "qwen"]
 }
 ```
 
 ## `GET /v1/voices`
 
-Reflects the **active backend's** capabilities. Example (`TTS_BACKEND=qwen`):
+Capabilities for a model's backend. Defaults to the default model; pass
+`?model=<id-or-backend>` for a specific one (e.g. `?model=kokoro`).
 
 ```json
 {
   "backend": "qwen",
+  "model": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
   "speakers": ["Vivian", "Serena", "Uncle_Fu", "..."],
   "languages": ["Auto", "Chinese", "English", "..."],
   "default_speaker": "Vivian",
@@ -122,9 +131,9 @@ Reflects the **active backend's** capabilities. Example (`TTS_BACKEND=qwen`):
 }
 ```
 
-For `kokoro`, speakers are voices like `af_heart`/`bm_george` and languages are
-`American English`, `Japanese`, … The `mock` backend accepts anything and
-returns empty lists.
+For `kokoro`, speakers are voices like `af_heart`/`bm_george`; for `dia`,
+speakers are empty (use `[S1]`/`[S2]` tags). The `mock` backend returns empty
+lists (accepts anything). An unknown `model` returns `400`.
 
 ## `GET /health`
 

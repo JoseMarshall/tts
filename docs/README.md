@@ -14,20 +14,22 @@ Reference documentation for the Qwen3-TTS streaming server.
 
 ```
 app/
-  config.py     Settings (env-driven) + model allow-list
-  schemas.py    Pydantic request models, speaker/language lists, validation
+  config.py     Settings (env-driven): default backend, enabled backends, models
+  schemas.py    Pydantic request models (model/speaker/language/speed/mode)
   audio.py      float->PCM16 conversion, WAV framing (streaming + exact-size)
-  engine.py     TTSEngine ABC, MockEngine, QwenEngine (the one model-call site)
+  engine.py     Engine registry + TTSEngine ABC: Mock/Qwen/Kokoro/Dia engines
   streaming.py  Synthesizer: thread<->async bridge, serialization, cancellation
-  manager.py    EngineManager: lazy per-model Synthesizer registry
+  manager.py    EngineManager: multi-backend catalog + lazy per-model routing
   main.py       FastAPI app: REST, OpenAI, and WebSocket endpoints
 ```
 
 ## Terminology
 
-- **Engine** — wraps a single loaded model and produces float audio chunks.
+- **Engine** — wraps a single loaded model and produces float audio chunks; each
+  backend (Qwen, Kokoro, Dia, …) is a registered `TTSEngine` subclass.
 - **Synthesizer** — an engine plus the concurrency controls (queue, semaphore,
   cancellation) and the byte-level streaming logic around it.
-- **Manager** — the registry that owns one Synthesizer per model id.
+- **Manager** — hosts multiple backends and routes each request's `model` to the
+  right lazily-loaded Synthesizer (one per `backend:model_id`).
 - **Chunk / frame** — one unit of streamed audio (`TTS_STREAM_CHUNK_SAMPLES`
   samples ≈ 50 ms at 24 kHz), sent as 16-bit little-endian PCM.

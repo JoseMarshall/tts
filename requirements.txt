@@ -20,3 +20,9 @@ numpy>=1.26
 #   #   Windows: winget install eSpeak-NG.eSpeak-NG   (or the MSI release)
 #   #   Debian/Ubuntu: sudo apt-get install espeak-ng
 #   #   macOS: brew install espeak-ng
+#
+# Dia-1.6B  (TTS_BACKEND=dia)  -- needs a CUDA GPU:
+#   pip install -U git+https://github.com/nari-labs/dia.git soundfile
+#
+# Multiple backends can be installed together and selected per request; see
+# TTS_BACKENDS in .env.example.

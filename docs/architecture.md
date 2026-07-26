@@ -57,6 +57,9 @@ class's `capabilities()` (speakers, languages, defaults). Class metadata
 - **`KokoroEngine`** — loads Kokoro-82M via `KPipeline` (one pipeline cached per
   language code). Kokoro yields per text segment, which the engine re-slices
   into fixed frames. Preset voices only; cloning/design raise `ValueError`→`400`.
+- **`DiaEngine`** — loads Dia-1.6B (`dia` package). Dialogue via `[S1]`/`[S2]`
+  tags, no preset speakers; optional voice cloning via `audio_prompt`. Outputs
+  44.1 kHz and isn't natively streaming, so it generates then re-chunks.
 
 ### `Synthesizer` (`streaming.py`)
 Owns one engine plus the concurrency machinery:
@@ -74,13 +77,22 @@ Owns one engine plus the concurrency machinery:
   (`TTS_MAX_QUEUE`).
 
 ### `EngineManager` (`manager.py`)
-A registry mapping model id → `Synthesizer`, built lazily on first use. Building
-is blocking (loading a real model onto the GPU), so it runs in a thread executor
-under an `asyncio.Lock` so concurrent first-requests for the same model load it
-once. Requested names are resolved through an alias table (generic names like
-`qwen3-tts`, `tts-1`, `default` → the configured default) and, for the real
-backend, validated against the allow-list so a request can't trigger an
-arbitrary multi-gigabyte download.
+Hosts **multiple backends at once** and routes each request to the right one.
+
+- A **catalog** of `ModelSpec(backend, model_id)` is built at startup from the
+  default (`TTS_BACKEND`/`TTS_MODEL_ID`), `TTS_BACKENDS` (extra client-selectable
+  backends), and `TTS_MODELS` (`backend:model_id` entries).
+- `resolve(model)` maps a request's `model` to a `ModelSpec`: a **backend name**
+  → that backend's default model; a catalogued **model id**; `backend:model_id`;
+  or a generic alias → the default. Anything else raises `UnknownModelError`
+  (→`400`) so a request can't trigger an arbitrary multi-gigabyte download. The
+  `mock` default backend is permissive (fabricates any name) for tests/dev.
+- Each `ModelSpec` gets its own `Synthesizer`, built **lazily** on first use in a
+  thread executor under an `asyncio.Lock` (concurrent first-requests load once)
+  and cached by `backend:model_id`. Different models — even different backends —
+  each have their own engine and semaphore, so they can run concurrently (mind
+  GPU memory). `/v1/voices` reads a spec's backend `capabilities()` without
+  loading the model.
 
 ### Routes (`main.py`)
 Stateless glue: parse/validate the request, resolve the `Synthesizer` for the

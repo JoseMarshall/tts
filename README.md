@@ -11,7 +11,10 @@ the model emits its first packet, rather than after the whole clip is generated.
 | `mock` | — | Dependency-free tone generator. Runs anywhere; used for dev/CI. |
 | `qwen` | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) | CUDA GPU. Custom voice / cloning / (design checkpoint). |
 | `kokoro` | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | Tiny (~350 MB), CPU or GPU. Preset voices, many languages. |
+| `dia` | [Dia-1.6B](https://huggingface.co/nari-labs/Dia-1.6B) | GPU. Dialogue with `[S1]`/`[S2]` tags; 44.1 kHz; voice cloning. |
 
+**One server can host several backends at once** and the client picks per request
+(by backend name or model id) — see [Selecting a backend](#selecting-a-backend-per-request).
 Adding another model is a self-contained ~40-line engine class plus one
 decorator — see [Adding a backend](#adding-a-backend).
 
@@ -24,8 +27,10 @@ decorator — see [Adding a backend](#adding-a-backend).
   receive audio concurrently, cancel mid-utterance)
 - **Pluggable backends** via an engine registry; `GET /v1/voices` and defaults
   are backend-aware
-- **Per-request model, language, voice and speed** (`model`, `language`,
-  `speaker`, `speed`); models are lazily loaded and restricted to an allow-list
+- **Client-selectable backend per request** — one server hosts several models
+  (Qwen + Kokoro + Dia + …); the request's `model` picks by backend name or id
+- **Per-request language, voice and speed** (`language`, `speaker`, `speed`);
+  models are lazily loaded and restricted to an operator allow-list
 - Voice modes (where the backend supports them):
   - **Custom voice** (default) — a preset `speaker`, with `instruct` as an
     optional style modifier
@@ -104,6 +109,53 @@ curl -s -X POST localhost:8000/v1/tts/stream \
   -d '{"text":"Hello from Kokoro.","speaker":"af_heart","language":"English","speed":1.0}' \
   -o kokoro.wav
 ```
+
+### Dia-1.6B (`dia`) — GPU
+
+```bash
+pip install -r requirements.txt
+pip install -U git+https://github.com/nari-labs/dia.git soundfile
+
+export TTS_BACKEND=dia
+export TTS_MODEL_ID=nari-labs/Dia-1.6B
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Dia is a **dialogue** model: mark speakers inline with `[S1]`/`[S2]` and add
+non-verbals like `(laughs)`. It has no preset speakers; for a consistent voice,
+clone one with `ref_audio` (+ `ref_text`). Output is 44.1 kHz.
+
+```bash
+curl -s -X POST localhost:8000/v1/tts \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"[S1] Hi there. [S2] Hello! (laughs)"}' -o dia.wav
+```
+
+## Selecting a backend per request
+
+One server can host several backends and let the **client** choose per request.
+Enable the extra backends the operator wants exposed, then select via `model`:
+
+```bash
+export TTS_BACKEND=qwen            # default backend
+export TTS_BACKENDS=kokoro,dia     # also selectable by clients
+uvicorn app.main:app
+```
+
+```bash
+# by backend name (uses that backend's default model)
+curl ... -d '{"text":"...","model":"kokoro","speaker":"af_heart"}'
+curl ... -d '{"text":"[S1] Hi [S2] Hello","model":"dia"}'
+# by explicit model id
+curl ... -d '{"text":"...","model":"hexgrad/Kokoro-82M"}'
+# omit "model" -> the default backend (qwen here)
+```
+
+`GET /v1/models` lists everything selectable (model ids + backend-name aliases);
+`GET /v1/voices?model=<id-or-backend>` shows that model's voices/languages. Each
+model loads lazily on first use, so exposing several costs nothing until used.
+Unlisted models return `400` — so a request can't trigger an arbitrary download;
+add specific ones with `TTS_MODELS=backend:model_id,...`.
 
 ## Adding a backend
 
@@ -200,9 +252,10 @@ All settings are environment variables prefixed with `TTS_`; see
 
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_BACKEND` | `mock` | Engine to load: `mock`, `qwen`, `kokoro`, … |
-| `TTS_MODEL_ID` | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Default model (set to `hexgrad/Kokoro-82M` for Kokoro) |
-| `TTS_MODELS` | *(empty)* | Extra selectable models (comma-separated allow-list) |
+| `TTS_BACKEND` | `mock` | **Default** engine: `mock`, `qwen`, `kokoro`, `dia`, … |
+| `TTS_BACKENDS` | *(empty)* | Extra backends clients may select by name (comma-separated) |
+| `TTS_MODEL_ID` | *(empty)* | Default model for the default backend (empty = backend's own default) |
+| `TTS_MODELS` | *(empty)* | Extra selectable models, each `backend:model_id` (comma-separated allow-list) |
 | `TTS_DEVICE` | `cuda:0` | Torch device (GPU backends) |
 | `TTS_DEFAULT_SPEAKER` / `TTS_DEFAULT_LANGUAGE` | *(empty)* | Empty = backend's own default |
 | `TTS_SAMPLE_RATE` | `24000` | Output sample rate (Hz) |
