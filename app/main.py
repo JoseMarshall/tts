@@ -636,101 +636,109 @@ async def sst_ws_endpoint(ws: WebSocket):
     audio_buf: list[bytes] = []
     session: dict = {"model": None, "language": getattr(settings, "sst_default_language", "")}
     active_task: asyncio.Task | None = None
-    segment_count: int = 0      # segments for the current transcription
 
     try:
         while True:
-            kind = await ws.receive_type()
+            # TestClient passes frames as either {"text": "..." } or {"bytes": b"..."}.
+            frame = await ws.receive()  # type: ignore[no-untyped-call]
 
-            if isinstance(kind, WebSocketDisconnect):
+            if isinstance(frame, dict) and frame.get("type") == "websocket.disconnect":
                 break
 
-            if isinstance(kind, bytes) or isinstance(kind, bytearray):
-                # --- Binary frame → raw PCM chunk --------------------------------
-                data = kind if isinstance(kind, (bytes, bytearray)) else bytes(kind)   # type: ignore[arg-type]
-                audio_buf.append(data)
+            if "bytes" in frame:
+                audio_buf.append(bytes(frame["bytes"]))  # type: ignore[arg-type]
                 continue
 
-            if isinstance(kind, str):
-                # Text frame is always JSON control message
+            text = frame.get("text")
+            if not text:
+                continue
+
+            try:
+                msg = json.loads(text)
+            except (json.JSONDecodeError, TypeError):
+                await ws.send_json({"type": "error", "message": "invalid JSON in text frame"})
+                continue
+
+            mtype = msg.get("type")
+
+            if mtype == "init":
+                session["model"] = msg.get("model")
+                session["language"] = msg.get("language")
+                await ws.send_json({"type": "configured"})
+
+            elif mtype == "start":
+                await ws.send_json({"type": "start", "sample_rate": 16000})
+
+            elif mtype == "chunk":
+                data = msg.get("data", b"")
+                if isinstance(data, str):
+                    padding = "=" * (-len(data) % 4)
+                    audio_buf.append(_b64.urlsafe_b64decode(data + padding))
+                elif isinstance(data, (bytes, bytearray)):
+                    audio_buf.append(bytes(data))
+
+            elif mtype == "flush":
+                if not audio_buf:
+                    await ws.send_json({"type": "error", "message": "no audio data to transcribe"})
+                    continue
+                audio_bytes = b"".join(audio_buf)
+                audio_buf.clear()
+
+                model_name = msg.get("model") or session.get("model") or manager.default_model
+                # Resolve the model (may be a backend name or model id).
+                resolved = None
                 try:
-                    msg = json.loads(kind)  # parse manually to avoid dependency on receive_json for all paths
-                except (json.JSONDecodeError, TypeError):
-                    await ws.send_json({"type": "error", "message": f"invalid JSON in text frame"})
+                    resolved = manager.resolve(model_name) if model_name else manager.default_spec  # type: ignore[arg-type,attr-defined]
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": f"unknown model {model_name!r}"})
                     continue
 
-                mtype = msg.get("type")
+                try:
+                    transcriber_obj = await manager.get(resolved.model_id if hasattr(resolved, 'model_id') else model_name)  # type: ignore[arg-type]
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": str(exc)})
+                    continue
 
-                if mtype == "init":
-                    session["model"] = msg.get("model")
-                    session["language"] = msg.get("language")
-                    await ws.send_json({"type": "configured"})
+                if getattr(transcriber_obj, 'at_capacity', False):
+                    await ws.send_json({"type": "error", "message": "server busy: queue is full"})
+                    continue
 
-                elif mtype == "start":
-                    await ws.send_json({"type": "start", "sample_rate": 16000})
+                # Set per-call language override
+                lang = session.get('language')
+                transcriber_obj.set_language(lang)  # type: ignore[attr-defined]
 
-                elif mtype == "chunk":
-                    # Accumulate base64 audio chunk into buffer
-                    data = msg.get("data", b"")
-                    if isinstance(data, str) and data:
-                        padding = "=" * (-len(data) % 4)
-                        decoded = _b64.urlsafe_b64decode(data + padding)
-                        audio_buf.append(decoded)
-                    elif isinstance(data, (bytes, bytearray)):
-                        audio_buf.append(bytes(data))
+                # Run transcription inline (send segment frames back as they arrive).
+                count = 0
+                full_text_parts: list[str] = []
+                try:
+                    async for seg in transcriber_obj.stream_text(audio_bytes, language=getattr(transcriber_obj, 'language', session.get('language'))):  # type: ignore[arg-type,union-attr]
+                        count += 1
+                        full_text_parts.append(seg)
+                        await ws.send_json({
+                            "type": "segment", "index": count - 1, "text": seg,
+                        })
+                except Exception as exc:
+                    await ws.send_json({"type": "error", "message": str(exc)})
+                    continue
 
-                elif mtype == "flush":
-                    # Transcribe accumulated audio and send segments back
-                    if not audio_buf:
-                        await ws.send_json({"type": "error", "message": "no audio data to transcribe"})
-                        continue
-                    audio_bytes = b"".join(audio_buf)
-                    audio_buf.clear()
-                    segment_count += 1
+                full_text = " ".join(full_text_parts) if full_text_parts else ""
+                await ws.send_json({"type": "done", "count": count, "full_text": full_text})
 
-                    # Get or create transcriber for the requested model
-                    try:
-                        model_name = msg.get("model") or session.get("model") or manager.default_model
-                        transcriber = await manager.get(model_name)  # type: ignore[arg-type]
-                    except Exception as exc:
-                        await ws.send_json({"type": "error", "message": str(exc)})
-                        continue
+            elif mtype == "cancel":
+                if active_task and not active_task.done():
+                    active_task.cancel()
+                    await ws.send_json({"type": "cancelled"})
+                    active_task = None
 
-                    # Check capacity before starting
-                    if transcriber.at_capacity:   # type: ignore[attr-defined]
-                        await ws.send_json({"type": "error", "message": "server busy: queue is full"})
-                        continue
+            elif mtype == "close":
+                break
 
-                    # Run transcription as background task
-                    active_task = asyncio.create_task(
-                        _run_ws_transcription(
-                            ws,
-                            transcriber,       # Transcriber instance
-                            [audio_bytes],     # list of audio chunks (already joined)
-                            language=session.get("language"),
-                        )
-                    )
-
-                elif mtype == "cancel":
-                    # Cancel the active transcription task if it exists
-                    if active_task is not None and not active_task.done():
-                        active_task.cancel()
-                        await ws.send_json({"type": "cancelled"})
-                        active_task = None
-
-                elif mtype == "close":
-                    break
-
-                else:
-                    await ws.send_json({
-                        "type": "error",
-                        "message": f"unknown message type {mtype!r}",
-                    })
-
+            else:
+                await ws.send_json({"type": "error", "message": f"unknown message type {mtype!r}"})
     except WebSocketDisconnect:
         pass
     finally:
-        if active_task is not None and not active_task.done():
+        if active_task and not active_task.done():
             try:
                 active_task.cancel()
                 await active_task

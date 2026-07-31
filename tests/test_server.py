@@ -1,9 +1,11 @@
 """Tests for the audio helpers and the HTTP endpoints (mock backend)."""
 from __future__ import annotations
 
+import json
 import struct
 import wave
 import io
+import base64 as _b64  # local alias for inline use
 
 import numpy as np
 import pytest
@@ -335,7 +337,7 @@ def test_sst_voices_endpoint(client):
 
 def test_native_sst_endpoint(client):
     audio_bytes = b"\x00" * 320
-    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
     r = client.post("/v1/sst", json={"audio": encoded})
     assert r.status_code == 200
@@ -346,7 +348,7 @@ def test_native_sst_endpoint(client):
 
 def test_native_sst_endpoint_segments(client):
     audio_bytes = b"\x00" * 320
-    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
     r = client.post("/v1/sst", json={"audio": encoded, "response_format": "segments"})
     assert r.status_code == 200
@@ -357,7 +359,7 @@ def test_native_sst_endpoint_segments(client):
 
 def test_native_sst_endpoint_text(client):
     audio_bytes = b"\x00" * 320
-    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
     r = client.post("/v1/sst", json={"audio": encoded, "response_format": "text"})
     assert r.status_code == 200
@@ -411,7 +413,7 @@ def test_openai_sst_endpoint_no_file(client):
 
 def test_streaming_sst_endpoint(client):
     audio_bytes = b"\x00" * 320
-    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
     r = client.post("/v1/sst/stream", json={"audio": encoded})
     assert r.status_code == 200
@@ -441,7 +443,7 @@ def test_sst_empty_audio(client):
 
 def test_sst_stream_no_start_end(client):
     audio_bytes = b"\x00" * 320
-    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
     r = client.post("/v1/sst/stream", json={"audio": encoded})
     text = r.content.decode()
@@ -479,7 +481,7 @@ def test_sst_ws_config_and_transcribe(client):
 
         # Send audio chunk (base64)
         audio_bytes = b"\x00" * 320
-        encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+        encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
         ws.send_json({"type": "chunk", "data": encoded})
 
         # Flush → triggers transcription
@@ -534,3 +536,24 @@ def test_sst_ws_endpoint(client):
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         ws.send_json({"type": "close"})
+
+
+def test_sst_ws_binary(client):
+    """WS client can send raw binary PCM and get segments back."""
+    with client.websocket_connect("/v1/sst_ws") as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        ws.send_json({"type": "start"})
+        start_ack = ws.receive_json()
+        assert start_ack["type"] == "start"
+        ws.send_bytes(b"\x00" * 320)
+        ws.send_json({"type": "flush"})
+        done_received = False
+        for _ in range(20):
+            frame = ws.receive()
+            if "text" in frame:
+                msg = json.loads(frame["text"])
+                if msg["type"] == "done":
+                    done_received = True
+                    break
+        assert done_received

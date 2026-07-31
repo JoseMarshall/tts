@@ -129,6 +129,7 @@ class Transcriber:
 
     def __init__(self, engine: "SSEngine", settings):  # accepts _SSTSettings
         self.engine = engine            # the loaded SSEngine instance
+        self._language: str | None = None  # per-call language override set by handler
         self.settings = settings        # shared server config (_SSTSettings)
         self._gpu_lock = asyncio.Semaphore(1)   # one generation at a time
         self._inflight = 0                        # queued + running requests
@@ -147,15 +148,22 @@ class Transcriber:
         """True if the transcription queue is full (admission control)."""
         return self._inflight >= getattr(self.settings, "max_queue", 32)
 
+    # -- language override (set by HTTP handler per-call) ----------------------
+
+    def set_language(self, lang: str | None) -> None:
+        """Override the language for the next transcription call."""
+        self._language = lang
+
     # -- worker thread --------------------------------------------------------
 
     def _run_blocking(
         self, audio_bytes: bytes, q: "queue.Queue", cancel: "threading.Event | None",
+        lang: str | None = None,
     ) -> None:
         """Worker-thread body: produce text segments into the queue."""
         try:
-            lang = getattr(self.settings, "default_language", None)
-            for segment in self.engine.stream_transcribe(audio_bytes, language=lang):
+            effective_lang = lang if lang is not None else getattr(self.settings, "default_language", None)
+            for segment in self.engine.stream_transcribe(audio_bytes, language=effective_lang):
                 if cancel is not None and cancel.is_set():
                     break
                 q.put(segment)
@@ -167,8 +175,8 @@ class Transcriber:
     # -- async consumer -------------------------------------------------------
 
     async def _text_segments(
-        self, audio_bytes: bytes,
-        cancel: "threading.Event | None" = None,
+        self, audio_bytes: bytes, cancel: "threading.Event | None" = None,
+        lang: str | None = None,
     ) -> AsyncIterator[str]:
         """Yield text segments as the worker produces them."""
         if self._inflight >= getattr(self.settings, "max_queue", 32):
@@ -179,8 +187,9 @@ class Transcriber:
             async with self._gpu_lock:
                 loop = asyncio.get_running_loop()
                 q: "queue.Queue" = queue.Queue(maxsize=8)
+                effective_lang = lang if lang is not None else self._language
                 worker = threading.Thread(
-                    target=self._run_blocking, args=(audio_bytes, q, cancel), daemon=True)
+                    target=self._run_blocking, args=(audio_bytes, q, cancel), kwargs={"lang": effective_lang}, daemon=True)
                 worker.start()
                 stopped = False
                 while True:
@@ -203,9 +212,11 @@ class Transcriber:
     async def stream_text(
         self, audio_bytes: bytes,
         cancel: "threading.Event | None" = None,
+        language: str | None = None,
     ) -> AsyncIterator[str]:
         """Yield text segments for HTTP streaming."""
-        async for seg in self._text_segments(audio_bytes, cancel):
+        effective_lang = language if language is not None else self._language
+        async for seg in self._text_segments(audio_bytes, cancel, lang=effective_lang):
             yield seg
 
     # -- non-streaming ---------------------------------------------------------

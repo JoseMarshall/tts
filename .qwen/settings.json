@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\\\\.venv\\\\scripts\\\\python.exe *)",
+      "Bash(.venv\\scripts\\python.exe *)",
+      "Bash(set)",
+      "Bash(findstr *)",
+      "Bash(dir *)",
+      "Bash(type *)"
+    ]
+  },
+  "$version": 4
+}
