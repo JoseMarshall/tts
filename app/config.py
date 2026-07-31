@@ -98,9 +98,10 @@ class _SSTSettings(BaseSettings):
     dtype: Literal["bfloat16", "float16", "float32"] = "bfloat16"
 
     # Audio
-    sample_rate: int = 16000               # target sample rate for input audio
-    stream_chunk_samples: int = 1600       # ~100 ms at 16 kHz per chunk
-    max_input_seconds: float = 30.0        # reject longer segments to guard GPU
+    sample_rate: int = 16000                   # target sample rate for input audio
+    default_language: str = ""                 # language hint for auto-detect fallback
+    stream_chunk_samples: int = 1600           # ~100 ms at 16 kHz per chunk
+    max_input_seconds: float = 30.0            # reject longer segments to guard GPU
 
     # ---- Concurrency / Server ----------------------------------------------
     max_queue: int = 32

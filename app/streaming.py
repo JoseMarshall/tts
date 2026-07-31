@@ -171,7 +171,7 @@ class Transcriber:
         cancel: "threading.Event | None" = None,
     ) -> AsyncIterator[str]:
         """Yield text segments as the worker produces them."""
-        if getattr(self.settings, "sst_max_queue", 32) < self._inflight:  # type: ignore[attr-defined]
+        if self._inflight >= getattr(self.settings, "max_queue", 32):
             raise RuntimeError("server busy: transcription queue is full")
 
         self._inflight += 1

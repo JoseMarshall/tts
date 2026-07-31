@@ -305,6 +305,7 @@ def test_ws_model_override(client):
 
 # ---- SST endpoint tests ---------------------------------------------------- #
 
+
 def test_health_includes_sst(client):
     r = client.get("/health")
     body = r.json()
@@ -333,12 +334,7 @@ def test_sst_voices_endpoint(client):
 
 
 def test_native_sst_endpoint(client):
-    # Post base64-encoded dummy audio and verify we get back text.
-    import json as json_mod
-    import base64
-
-    # 100 ms of silence at 16 kHz = 1600 int16 samples → ~320 bytes raw.
-    audio_bytes = bytes(320)
+    audio_bytes = b"\x00" * 320
     encoded = base64.urlsafe_b64encode(audio_bytes).decode()
 
     r = client.post("/v1/sst", json={"audio": encoded})
@@ -349,9 +345,9 @@ def test_native_sst_endpoint(client):
 
 
 def test_native_sst_endpoint_segments(client):
-    import base64
-    audio_bytes = bytes(320)
+    audio_bytes = b"\x00" * 320
     encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+
     r = client.post("/v1/sst", json={"audio": encoded, "response_format": "segments"})
     assert r.status_code == 200
     body = r.json()
@@ -359,36 +355,95 @@ def test_native_sst_endpoint_segments(client):
     assert "segments" in body
 
 
-def test_openai_sst_endpoint(client):
-    # The /v1/audio/transcriptions endpoint is OpenAI-compatible; verify it
-    # returns transcribed text. We use the JSON body approach (which already
-    # works via POST /v1/sst) since older httpx/starlette versions have trouble
-    # with multipart file uploads through TestClient.
-    import base64
-    audio_bytes = bytes(320)
+def test_native_sst_endpoint_text(client):
+    audio_bytes = b"\x00" * 320
     encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+
     r = client.post("/v1/sst", json={"audio": encoded, "response_format": "text"})
-    assert r.status_code == 200, f"status={r.status_code} body={r.text}"
-
-
-def test_openai_sst_endpoint_json_response(client):
-    import base64
-    audio_bytes = bytes(320)
-    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
-    # POST /v1/sst with response_format=segments mimics OpenAI verbose_json
-    r = client.post("/v1/sst", json={"audio": encoded, "response_format": "segments"})
     assert r.status_code == 200
     body = r.json()
     assert "text" in body
 
 
+def test_openai_sst_endpoint(client):
+    """Verify the OpenAI-compatible /v1/audio/transcriptions endpoint accepts files."""
+    # Create a minimal WAV audio file for the multipart upload.
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00" * 320)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_buf.getvalue(), "audio/wav")},
+        data={"model": "mock", "response_format": "text"},
+    )
+    assert r.status_code == 200
+
+
+def test_openai_sst_endpoint_verbose(client):
+    """OpenAI-compatible endpoint should return verbose_json when requested."""
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00" * 320)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_buf.getvalue(), "audio/wav")},
+        data={"model": "mock", "response_format": "json"},
+    )
+    assert r.status_code == 200
+
+
+def test_openai_sst_endpoint_no_file(client):
+    """/v1/audio/transcriptions should reject requests without audio."""
+    r = client.post(
+        "/v1/audio/transcriptions",
+        data={"model": "mock"},
+    )
+    assert r.status_code == 400
+
+
 def test_streaming_sst_endpoint(client):
-    import base64
-    audio_bytes = bytes(320)
+    audio_bytes = b"\x00" * 320
     encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+
     r = client.post("/v1/sst/stream", json={"audio": encoded})
     assert r.status_code == 200
     # NDJSON: "start\\n" ... segment lines ... "end\\n"
+    text_body = r.content.decode()
+    assert "start" in text_body.lower() or "segment" in text_body.lower()
+    assert "end" in text_body.lower()
+
+
+def test_sst_unknown_model(client):
+    r = client.post("/v1/sst", json={"audio": "dGVzdA==", "model": "nonexistent"})
+    assert r.status_code == 400
+
+
+def test_sst_missing_audio_fields(client):
+    # POST /v1/sst requires 'audio' field in the body.
+    r = client.post("/v1/sst", json={"model": "mock"})
+    assert r.status_code == 422
+
+
+def test_sst_empty_audio(client):
+    r = client.post("/v1/sst", json={"audio": ""})
+    assert r.status_code == 400
+    body = r.json()
+    assert "audio" in body.get("detail", "").lower() or "required" in body.get("detail", "").lower()
+
+
+def test_sst_stream_no_start_end(client):
+    audio_bytes = b"\x00" * 320
+    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+
+    r = client.post("/v1/sst/stream", json={"audio": encoded})
     text = r.content.decode()
-    assert "start" in text.lower() or "segment" in text.lower()
-    assert "end" in text.lower()
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    assert lines  # must have at least one frame
