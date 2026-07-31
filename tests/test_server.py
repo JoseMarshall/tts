@@ -447,3 +447,90 @@ def test_sst_stream_no_start_end(client):
     text = r.content.decode()
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     assert lines  # must have at least one frame
+
+
+# ---- SST WebSocket tests --------------------------------------------------- #
+
+def test_sst_ws_connect_and_ready(client):
+    with client.websocket_connect("/v1/sst_ws") as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        assert "models" in ready
+        assert "default_model" in ready
+        assert "sample_rate" in ready
+        ws.send_json({"type": "close"})
+
+
+def test_sst_ws_config_and_transcribe(client):
+    with client.websocket_connect("/v1/sst_ws") as ws:
+        # Connect → config → start → chunk → flush → done → close
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+
+        # Optional config
+        ws.send_json({"type": "init", "model": "mock"})
+        conf = ws.receive_json()
+        assert conf["type"] == "configured"
+
+        # Start segment
+        ws.send_json({"type": "start"})
+        start_ack = ws.receive_json()
+        assert start_ack["type"] == "start"
+
+        # Send audio chunk (base64)
+        audio_bytes = b"\x00" * 320
+        encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+        ws.send_json({"type": "chunk", "data": encoded})
+
+        # Flush → triggers transcription
+        ws.send_json({"type": "flush"})
+
+        # Receive segment messages and final done
+        segments: list[dict] = []
+        done_fired = False
+        while True:
+            frame = ws.receive()
+            if "text" in frame:
+                msg = json.loads(frame["text"])
+                if msg["type"] == "done":
+                    done_fired = True
+                    break
+                elif msg["type"] == "segment":
+                    segments.append(msg)
+        assert done_fired
+        assert len(segments) > 0
+
+        # Close
+        ws.send_json({"type": "close"})
+
+
+def test_sst_ws_binary_audio(client):
+    """Client can send raw binary PCM instead of base64."""
+    with client.websocket_connect("/v1/sst_ws") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "start"})
+
+        # Send raw bytes (not base64) — server treats binary frames as PCM
+        ws.send_bytes(b"\x00" * 320)
+        ws.send_json({"type": "flush"})
+
+        segments: list[dict] = []
+        done_fired = False
+        while True:
+            frame = ws.receive()
+            if "text" in frame:
+                msg = json.loads(frame["text"])
+                if msg["type"] == "done":
+                    done_fired = True
+                    break
+                elif msg["type"] == "segment":
+                    segments.append(msg)
+        assert done_fired
+
+
+def test_sst_ws_endpoint(client):
+    """SST WebSocket endpoint handles sessions properly."""
+    with client.websocket_connect("/v1/sst_ws") as ws:
+        ready = ws.receive_json()
+        assert ready["type"] == "ready"
+        ws.send_json({"type": "close"})
