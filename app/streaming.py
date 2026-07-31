@@ -110,3 +110,109 @@ class Synthesizer:
         """Collect the full PCM buffer (used for non-streaming responses)."""
         parts = [pcm async for pcm in self._pcm_chunks(req)]
         return b"".join(parts)
+
+
+# --------------------------------------------------------------------------- #
+# Transcriber — SSEngine bridge (audio-in → text-out)                         #
+# --------------------------------------------------------------------------- #
+
+_SENTINEL_TXT = object()
+
+
+class Transcriber:
+    """Wraps an :class:`~app.engine.SSEngine` with async concurrency controls.
+
+    Mirrors :class:`Synthesizer` but for **speech-to-text**: consumes audio bytes,
+    yields text segments as JSON-serializable strings, and supports cancellation
+    between segments (like TTS does for PCM frames).
+    """
+
+    def __init__(self, engine: "SSEngine", settings):  # accepts _SSTSettings
+        self.engine = engine            # the loaded SSEngine instance
+        self.settings = settings        # shared server config (_SSTSettings)
+        self._gpu_lock = asyncio.Semaphore(1)   # one generation at a time
+        self._inflight = 0                        # queued + running requests
+
+    @property
+    def sample_rate(self) -> int:
+        """Input audio sample-rate hint."""
+        return self.engine.SAMPLE_RATE or getattr(self.settings, "sample_rate", 16000)
+
+    @property
+    def model_id(self) -> str:
+        return self.engine.model_id
+
+    @property
+    def at_capacity(self) -> bool:
+        """True if the transcription queue is full (admission control)."""
+        return self._inflight >= getattr(self.settings, "max_queue", 32)
+
+    # -- worker thread --------------------------------------------------------
+
+    def _run_blocking(
+        self, audio_bytes: bytes, q: "queue.Queue", cancel: "threading.Event | None",
+    ) -> None:
+        """Worker-thread body: produce text segments into the queue."""
+        try:
+            lang = getattr(self.settings, "default_language", None)
+            for segment in self.engine.stream_transcribe(audio_bytes, language=lang):
+                if cancel is not None and cancel.is_set():
+                    break
+                q.put(segment)
+        except Exception as exc:  # surface errors to the consumer
+            q.put(exc)
+        finally:
+            q.put(_SENTINEL_TXT)
+
+    # -- async consumer -------------------------------------------------------
+
+    async def _text_segments(
+        self, audio_bytes: bytes,
+        cancel: "threading.Event | None" = None,
+    ) -> AsyncIterator[str]:
+        """Yield text segments as the worker produces them."""
+        if getattr(self.settings, "sst_max_queue", 32) < self._inflight:  # type: ignore[attr-defined]
+            raise RuntimeError("server busy: transcription queue is full")
+
+        self._inflight += 1
+        try:
+            async with self._gpu_lock:
+                loop = asyncio.get_running_loop()
+                q: "queue.Queue" = queue.Queue(maxsize=8)
+                worker = threading.Thread(
+                    target=self._run_blocking, args=(audio_bytes, q, cancel), daemon=True)
+                worker.start()
+                stopped = False
+                while True:
+                    item = await loop.run_in_executor(None, q.get)
+                    if item is _SENTINEL_TXT:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    if stopped:
+                        continue
+                    if cancel is not None and cancel.is_set():
+                        stopped = True
+                        continue
+                    yield item
+        finally:
+            self._inflight -= 1
+
+    # -- streaming bridge (HTTP) -----------------------------------------------
+
+    async def stream_text(
+        self, audio_bytes: bytes,
+        cancel: "threading.Event | None" = None,
+    ) -> AsyncIterator[str]:
+        """Yield text segments for HTTP streaming."""
+        async for seg in self._text_segments(audio_bytes, cancel):
+            yield seg
+
+    # -- non-streaming ---------------------------------------------------------
+
+    async def transcribe(
+        self, audio_bytes: bytes,
+    ) -> str:
+        """Consume the full segment stream and return one concatenated transcript."""
+        parts = [seg async for seg in self._text_segments(audio_bytes)]
+        return " ".join(parts)

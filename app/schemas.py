@@ -88,3 +88,42 @@ class OpenAISpeechRequest(BaseModel):
     # Non-standard extras (honoured if supplied):
     language: str = "Auto"
     instructions: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# SST (Speech-to-text) schemas                                                #
+# --------------------------------------------------------------------------- #
+
+SstResponseFormat = Literal["text", "segments", "srt", "vtt"]
+
+
+class SSTRequest(BaseModel):
+    """Native speech-to-text request. Accepts audio and returns text or segments.
+
+    The ``audio`` field is a base64-encoded WAV/FLAC/MP3/PCM buffer. On the wire
+    (HTTP JSON body) this must be a string; for form-data uploads, pass the file
+    directly as ``file``.
+    """
+
+    audio: str = Field(..., description="Base64-encoded audio buffer.")
+    language: Optional[str] = Field(
+        None,
+        description="Language hint (e.g. 'en', 'fr'). Empty or omitted -> auto-detect.",
+    )
+    model: Optional[str] = Field(
+        None,
+        description="Which SST backend/model to use. Either a backend name "
+                    "(e.g. 'voxtral', 'whisper') or a model id (e.g. "
+                    "'mistralai/Voxtral-Small-24B'). Omit for the server default.",
+    )
+    response_format: SstResponseFormat = "text"
+
+
+class OpenAISSTResponse(BaseModel):
+    """Response model for the OpenAI-compatible '/v1/audio/transcriptions' endpoint.
+
+    Mirrors OpenAI's ``/v1/audio/transcriptions`` response shape so clients can
+    drop-in use this server as an OpenAI-compliant transcript provider.
+    """
+
+    text: str = Field(..., description="Transcribed text.")

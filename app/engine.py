@@ -450,3 +450,270 @@ def _as_float_mono(arr) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 def build_engine(settings: Settings, model_id: str | None = None) -> TTSEngine:
     return engine_class(settings.backend)(settings, model_id)
+
+
+# --------------------------------------------------------------------------- #
+# SST (Speech-to-text) engines — parallel hierarchy                           #
+# --------------------------------------------------------------------------- #
+
+_SST_REGISTRY: dict[str, type["SSEngine"]] = {}
+
+
+def _sst_register(cls: type["SSEngine"]) -> type["SSEngine"]:
+    """Class decorator: register an SST engine under its ``NAME``."""
+    if not getattr(cls, "NAME", None):
+        raise ValueError(f"{cls.__name__} must define a NAME")
+    _SST_REGISTRY[cls.NAME] = cls
+    return cls
+
+
+def sst_available_backends() -> list[str]:
+    return sorted(_SST_REGISTRY)
+
+
+def sst_engine_class(name: str) -> type["SSEngine"]:
+    try:
+        return _SST_REGISTRY[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown SST backend {name!r}. Available: {sst_available_backends()}"
+        )
+
+
+def sst_engine_default_model(name: str) -> str:
+    return sst_engine_class(name).DEFAULT_MODEL or name
+
+
+class SSEngine(abc.ABC):
+    """Abstract base for all speech-to-text engines.
+
+    An SST engine takes audio bytes and produces text.  Streaming engines can
+    yield partial segments while a non-streaming one waits for the complete
+    result before returning.
+
+    Adding a new SST backend mirrors the TTS pattern — register, define metadata,
+    implement ``__init__`` (heavy imports here) and ``stream_transcribe()``. No
+    changes are needed in routing, framing or the manager.
+
+    Backends bundled here:
+    * ``MockEngine``     -- dependency-free placeholder that echoes back the first
+      few words of a synthetic transcript.
+    * ``VoxtralEngine``  -- mistralai/Voxtral-Small-24B via transformers.
+    * ``WhisperEngine``  -- openai/whisper-large-v3 (or tiny/small/…) via native
+      whisper library or the ``transformers`` pipeline.
+    * ``OpenAIEngine``   -- delegates to OpenAI's /v1/audio/transcriptions API.
+    """
+
+    # ---- backend metadata (override in subclasses) ------------------------ #
+    NAME: str = ""
+    DEFAULT_MODEL: str = ""
+    SAMPLE_RATE: int | None = None          # target sample rate for resampling
+    MAX_INPUT_SECONDS: float = 30.0         # reject longer audio to guard GPU
+    LANGUAGES: list[str] = []              # hints the model accepts
+    SUPPORTED_FORMATS: frozenset[str] = frozenset({"wav", "flac", "mp3", "pcm"})
+
+    def __init__(self, settings: "Settings", model_id: str | None = None):
+        self.settings = settings
+        self.model_id = model_id or (
+            getattr(settings, "sst_model_id", "") or sst_engine_default_model(self.NAME)
+        )
+
+    @abc.abstractmethod
+    def stream_transcribe(
+        self, audio_bytes: bytes, *, language: str | None = None,
+    ) -> Iterator[str]:
+        """Yield partial text segments as the model produces them."""
+
+    def transcribe(
+        self, audio_bytes: bytes, *, language: str | None = None,
+    ) -> str:
+        """Full (non-streaming) transcription — concatenate all segments."""
+        segments = list(self.stream_transcribe(audio_bytes, language=language))
+        return " ".join(s for s in segments if s.strip())
+
+    def warmup(self) -> None:          # optional; best-effort
+        pass
+
+    def _language(self, req_language: str | None) -> str | None:
+        """Resolve a language hint, falling through settings → backend default."""
+        # Accept either the TTS-style or SST-style field name for compatibility.
+        return (req_language
+                or getattr(self.settings, "default_language", None)
+                or getattr(self.settings, "sst_default_language", None))
+
+    @classmethod
+    def capabilities(cls) -> dict:
+        return {
+            "backend": cls.NAME,
+            "languages": cls.LANGUAGES,
+            "default_model": getattr(cls, "DEFAULT_MODEL", ""),
+            "sample_rate": getattr(cls, "SAMPLE_RATE", None),
+            "supported_formats": sorted(cls.SUPPORTED_FORMATS),
+        }
+
+
+# --------------------------------------------------------------------------- #
+# Mock SST backend                                                            #
+# --------------------------------------------------------------------------- #
+@_sst_register
+class MockEngine(SSEngine):
+    """Generates a short synthetic transcript. No deps, no GPU needed."""
+
+    NAME = "mock"
+    DEFAULT_MODEL = "mock"
+    SAMPLE_RATE = 16000
+    MAX_INPUT_SECONDS = 30.0
+    LANGUAGES = ["Auto", "en", "fr", "es", "de"]
+
+    def stream_transcribe(
+        self, audio_bytes: bytes, *, language: str | None = None,
+    ) -> Iterator[str]:
+        # Return a deterministic "transcript" whose length scales with audio size.
+        seconds = len(audio_bytes) / self.SAMPLE_RATE if self.SAMPLE_RATE else 30
+        words = "the quick brown fox jumps over the lazy dog sample transcript"
+        chunk_count = max(1, int(seconds * 2))                  # ~2 segments / sec
+        word_idx = 0
+        for i in range(chunk_count):
+            n_words = min(len(words.split()) - word_idx, 5)
+            if n_words <= 0:
+                n_words = 5
+            chunk = " ".join(words.split()[word_idx:word_idx + n_words])
+            word_idx = (word_idx + n_words) % len(words.split())
+            yield chunk
+
+
+# --------------------------------------------------------------------------- #
+# VoxtralEngine — mistralai/Voxtral-Small-24B-2507 via transformers           #
+# --------------------------------------------------------------------------- #
+@_sst_register
+class VoxtralEngine(SSEngine):
+    """Voxtral-Small (8x7B) multimodal speech-to-text via the ``transformers``
+    pipeline.
+
+    Voxtral is a multimodal vision-language model, but for audio-only ASR we use
+    its **Audio2Text** pipeline which handles encoding + decoding internally.
+    """
+
+    NAME = "voxtral"
+    DEFAULT_MODEL = "mistralai/Voxtral-Small-24B-2507"
+    SAMPLE_RATE = 16000
+    MAX_INPUT_SECONDS = 60.0
+    LANGUAGES = ["en", "fr", "de", "es", "it", "pt", "ru", "ja", "zh"]
+
+    def __init__(self, settings: Settings, model_id: str | None = None):
+        super().__init__(settings, model_id)
+        from transformers import pipeline  # heavy import — local
+
+        log.info("Loading Voxtral pipeline for %s on %s ...", self.model_id, settings.device)
+        self._pipeline = pipeline(
+            "automatic-speech-recognition",
+            model=self.model_id,
+            device=int(settings.device.split(":")[-1]) if ":0" in settings.device else 0,
+            torch_dtype=getattr(__import__("torch"), settings.dtype),
+        )
+
+    def warmup(self) -> None:
+        try:
+            list(self.stream_transcribe(b"\x00" * self.SAMPLE_RATE))
+            log.info("Warmup complete.")
+        except Exception:  # pragma: no cover
+            log.exception("Warmup failed (continuing anyway).")
+
+    def stream_transcribe(
+        self, audio_bytes: bytes, *, language: str | None = None,
+    ) -> Iterator[str]:
+        # pipeline returns {"text": "..."} for a single chunk; we split into segments.
+        result = self._pipeline(
+            np.frombuffer(audio_bytes, dtype=np.float32)[:self.SAMPLE_RATE * self.MAX_INPUT_SECONDS],
+            generate_kwargs={"language": language} if language else None,
+        )
+        text = result.get("text", "")
+        if text:
+            yield text  # Voxtral delivers the whole clip at once; one segment
+
+
+# --------------------------------------------------------------------------- #
+# WhisperEngine — whisper-large-v3 (or any model) via native whisper or pipeline
+# --------------------------------------------------------------------------- #
+@_sst_register
+class WhisperEngine(SSEngine):
+    """OpenAI Whisper via the ``transformers`` automatic-speech-recognition
+    pipeline.  Supports any whisper model on HuggingFace.
+
+    Fallback: if ``whisper`` (native) is installed, uses it directly for better
+    performance; otherwise falls back to the ``pipeline`` approach.
+    """
+
+    NAME = "whisper"
+    DEFAULT_MODEL = "openai/whisper-large-v3-turbo"
+    SAMPLE_RATE = 16000
+    MAX_INPUT_SECONDS = 30.0
+    LANGUAGES = ["en", "fr", "de", "es", "it", "pt", "ru", "ja", "zh", "auto"]
+
+    def __init__(self, settings: Settings, model_id: str | None = None):
+        super().__init__(settings, model_id)
+        try:
+            import whisper as _whisper  # noqa: F401 -- check availability
+            self._use_native = True
+        except ImportError:
+            self._use_native = False
+
+    def _ensure_pipeline(self):
+        if getattr(self, "_pipeline", None) is not None:
+            return
+        from transformers import pipeline
+        log.info("Loading Whisper pipeline for %s on %s ...",
+                 self.model_id, self.settings.device)
+        dev = int(self.settings.device.split(":")[-1]) if ":0" in self.settings.device else 0
+        self._pipeline = pipeline(
+            "automatic-speech-recognition",
+            model=self.model_id or self.DEFAULT_MODEL,
+            device=dev,
+            torch_dtype=getattr(__import__("torch"), self.settings.dtype),
+        )
+
+    def warmup(self) -> None:
+        if self._use_native:
+            whisper_model = __import__("whisper").load_model(
+                self.model_id or self.DEFAULT_MODEL,
+                device=self.settings.device,
+            )
+            whisper_model.transcribe(b"\x00" * 16000)
+        else:
+            self._ensure_pipeline()
+            self._pipeline(b"\x00" * 16000)
+        log.info("Warmup complete.")
+
+    def stream_transcribe(
+        self, audio_bytes: bytes, *, language: str | None = None,
+    ) -> Iterator[str]:
+        lang = language or "auto"
+
+        # ---- native whisper path (faster, less VRAM) ------------------------ #
+        if self._use_native:
+            import soundfile as sf  # for loading audio
+            model = __import__("whisper").load_model(
+                self.model_id or self.DEFAULT_MODEL,
+                device=self.settings.device,
+            )
+            # whisper expects mono float32 PCM at 16kHz
+            try:
+                samples, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", samplerate=16000)
+            except Exception:
+                samples = np.frombuffer(audio_bytes, dtype=np.float32)[:16000 * self.MAX_INPUT_SECONDS]
+            result = model.transcribe(
+                samples if sr == 16000 else librosa.resample(samples, orig_sr=sr, target_sr=16000),
+                language=lang if lang != "auto" else None,
+            )
+            for seg in result.get("segments", []):
+                yield seg["text"]
+
+        # ---- transformers pipeline fallback -------------------------------- #
+        else:
+            self._ensure_pipeline()
+            samples = np.frombuffer(audio_bytes, dtype=np.float32)[:self.SAMPLE_RATE * self.MAX_INPUT_SECONDS]
+            gen_kwargs = {"language": lang} if lang != "auto" else None
+            result = self._pipeline(samples, generate_kwargs=gen_kwargs or {})
+            text = result.get("text", "")
+            if text:
+                yield text

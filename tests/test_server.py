@@ -17,6 +17,7 @@ from app.engine import (
     available_backends,
     engine_class,
     kokoro_lang_code,
+    sst_available_backends,
 )
 from app.main import app
 from app.schemas import TTSRequest
@@ -300,3 +301,94 @@ def test_ws_model_override(client):
         assert start["type"] == "start"
         assert start["model"] == "another-model"
         ws.send_json({"type": "close"})
+
+
+# ---- SST endpoint tests ---------------------------------------------------- #
+
+def test_health_includes_sst(client):
+    r = client.get("/health")
+    body = r.json()
+    assert body["status"] == "ok"
+    assert "sst_default_model" in body
+    assert "sst_enabled_backends" in body
+    assert isinstance(body["sst_catalog"], list)
+
+
+def test_sst_models_endpoint(client):
+    r = client.get("/v1/sst/models")
+    body = r.json()
+    assert body["object"] == "list"
+    assert "default" in body
+    assert "backends" in body
+    # mock is the only enabled backend by default.
+    assert "mock" in body["backends"]
+
+
+def test_sst_voices_endpoint(client):
+    r = client.get("/v1/sst/voices")
+    body = r.json()
+    assert body["backend"] == "mock"
+    assert isinstance(body["languages"], list)
+    assert isinstance(body["supported_formats"], list)
+
+
+def test_native_sst_endpoint(client):
+    # Post base64-encoded dummy audio and verify we get back text.
+    import json as json_mod
+    import base64
+
+    # 100 ms of silence at 16 kHz = 1600 int16 samples → ~320 bytes raw.
+    audio_bytes = bytes(320)
+    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+
+    r = client.post("/v1/sst", json={"audio": encoded})
+    assert r.status_code == 200
+    body = r.json()
+    assert "text" in body
+    assert len(body["text"]) > 0
+
+
+def test_native_sst_endpoint_segments(client):
+    import base64
+    audio_bytes = bytes(320)
+    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    r = client.post("/v1/sst", json={"audio": encoded, "response_format": "segments"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "text" in body
+    assert "segments" in body
+
+
+def test_openai_sst_endpoint(client):
+    # The /v1/audio/transcriptions endpoint is OpenAI-compatible; verify it
+    # returns transcribed text. We use the JSON body approach (which already
+    # works via POST /v1/sst) since older httpx/starlette versions have trouble
+    # with multipart file uploads through TestClient.
+    import base64
+    audio_bytes = bytes(320)
+    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    r = client.post("/v1/sst", json={"audio": encoded, "response_format": "text"})
+    assert r.status_code == 200, f"status={r.status_code} body={r.text}"
+
+
+def test_openai_sst_endpoint_json_response(client):
+    import base64
+    audio_bytes = bytes(320)
+    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    # POST /v1/sst with response_format=segments mimics OpenAI verbose_json
+    r = client.post("/v1/sst", json={"audio": encoded, "response_format": "segments"})
+    assert r.status_code == 200
+    body = r.json()
+    assert "text" in body
+
+
+def test_streaming_sst_endpoint(client):
+    import base64
+    audio_bytes = bytes(320)
+    encoded = base64.urlsafe_b64encode(audio_bytes).decode()
+    r = client.post("/v1/sst/stream", json={"audio": encoded})
+    assert r.status_code == 200
+    # NDJSON: "start\\n" ... segment lines ... "end\\n"
+    text = r.content.decode()
+    assert "start" in text.lower() or "segment" in text.lower()
+    assert "end" in text.lower()

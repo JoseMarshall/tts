@@ -2,26 +2,29 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 from contextlib import asynccontextmanager
 
 from fastapi import (
+    Body,
     Depends,
     FastAPI,
     Header,
     HTTPException,
     Request,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.responses import Response, StreamingResponse
 
 from .audio import CONTENT_TYPES, pcm_to_wav, wav_header
-from .config import Settings, get_settings
-from .engine import available_backends, engine_class
-from .manager import EngineManager, UnknownModelError
-from .schemas import OpenAISpeechRequest, TTSRequest
+from .config import Settings, get_settings, get_sst_settings
+from .engine import available_backends, engine_class, sst_available_backends, sst_engine_class
+from .manager import EngineManager, SSTManager, UnknownModelError
+from .schemas import OpenAISpeechRequest, OpenAISSTResponse, SSTRequest, TTSRequest
 from .streaming import Synthesizer
 
 logging.basicConfig(
@@ -34,17 +37,29 @@ log = logging.getLogger("tts")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    sst_settings = get_sst_settings()
+
+    # Validate TTS backend at startup.
     if settings.backend not in available_backends():
         raise RuntimeError(
             f"Unknown TTS_BACKEND {settings.backend!r}. "
             f"Available: {available_backends()}"
         )
+
     manager = EngineManager(settings)
-    app.state.manager = manager
+    sst_manager = SSTManager(sst_settings)  # type: ignore[arg-type]
+
+    app.state.tts_manager = manager
+    app.state.sst_manager = sst_manager
+
     log.info("Starting TTS server (default=%s, backends=%s, catalog=%s)",
              manager.default_spec.key, manager.enabled_backends,
              [s.key for s in manager.catalog])
+    log.info("SST defaults: backend=%s models=%s",
+             sst_manager.default_spec.key, sst_manager.enabled_backends)
+
     await manager.preload_default()
+    await sst_manager.preload_default()
     yield
     log.info("Shutting down.")
 
@@ -60,8 +75,12 @@ app = FastAPI(
 # --------------------------------------------------------------------------- #
 # Helpers / dependencies
 # --------------------------------------------------------------------------- #
-def get_manager(request: Request) -> EngineManager:
-    return request.app.state.manager
+def get_tts_manager(request: Request) -> EngineManager:
+    return request.app.state.tts_manager
+
+
+def get_sst_manager(request: Request) -> SSTManager:
+    return request.app.state.sst_manager
 
 
 async def resolve_synth(manager: EngineManager, model: str | None) -> Synthesizer:
@@ -106,7 +125,7 @@ def _stream_headers(synth: Synthesizer) -> dict:
 @app.get("/health")
 async def health(
     settings: Settings = Depends(get_settings),
-    manager: EngineManager = Depends(get_manager),
+    manager: EngineManager = Depends(get_tts_manager),
 ):
     return {
         "status": "ok",
@@ -116,11 +135,16 @@ async def health(
         "installed_backends": available_backends(),
         "catalog": [{"id": s.model_id, "backend": s.backend} for s in manager.catalog],
         "loaded": list(manager._synths.keys()),
+        # SST health ──────────────────────────────────────────────────────────
+        "sst_default_model": app.state.sst_manager.default_spec.key,
+        "sst_enabled_backends": app.state.sst_manager.enabled_backends,
+        "sst_catalog": [{"id": s.model_id, "backend": s.backend}
+                        for s in app.state.sst_manager.catalog],
     }
 
 
 @app.get("/v1/models")
-async def models(manager: EngineManager = Depends(get_manager)):
+async def models(manager: EngineManager = Depends(get_tts_manager)):
     # OpenAI-shaped list, enriched with backend + selectable aliases so a client
     # can discover what to put in the request's "model" field.
     data = [{"id": s.model_id, "object": "model", "backend": s.backend}
@@ -136,7 +160,7 @@ async def models(manager: EngineManager = Depends(get_manager)):
 @app.get("/v1/voices")
 async def voices(
     model: str | None = None,
-    manager: EngineManager = Depends(get_manager),
+    manager: EngineManager = Depends(get_tts_manager),
 ):
     # Capabilities depend on the model's backend. Defaults to the default model;
     # pass ?model=<id-or-backend> for a specific one.
@@ -153,7 +177,7 @@ async def voices(
 # Native endpoints
 # --------------------------------------------------------------------------- #
 @app.post("/v1/tts", dependencies=[Depends(require_auth)])
-async def tts(req: TTSRequest, manager: EngineManager = Depends(get_manager)):
+async def tts(req: TTSRequest, manager: EngineManager = Depends(get_tts_manager)):
     """Non-streaming synthesis; returns a complete audio file."""
     synth = await resolve_synth(manager, req.model)
     try:
@@ -172,7 +196,7 @@ async def tts(req: TTSRequest, manager: EngineManager = Depends(get_manager)):
 
 
 @app.post("/v1/tts/stream", dependencies=[Depends(require_auth)])
-async def tts_stream(req: TTSRequest, manager: EngineManager = Depends(get_manager)):
+async def tts_stream(req: TTSRequest, manager: EngineManager = Depends(get_tts_manager)):
     """Chunked streaming synthesis; audio starts arriving immediately."""
     synth = await resolve_synth(manager, req.model)
     # Admission control BEFORE the response starts — once StreamingResponse is
@@ -191,7 +215,7 @@ async def tts_stream(req: TTSRequest, manager: EngineManager = Depends(get_manag
 # --------------------------------------------------------------------------- #
 @app.post("/v1/audio/speech", dependencies=[Depends(require_auth)])
 async def openai_speech(
-    body: OpenAISpeechRequest, manager: EngineManager = Depends(get_manager)
+    body: OpenAISpeechRequest, manager: EngineManager = Depends(get_tts_manager)
 ):
     """Drop-in for the OpenAI audio/speech API. Streams the response body."""
     req = TTSRequest(
@@ -211,6 +235,176 @@ async def openai_speech(
         media_type=CONTENT_TYPES[req.response_format],
         headers=_stream_headers(synth),
     )
+
+
+# --------------------------------------------------------------------------- #
+# SST introspection                                                             #
+# --------------------------------------------------------------------------- #
+
+
+@app.get("/v1/sst/models")
+async def sst_models(
+    manager: SSTManager = Depends(get_sst_manager),
+):
+    """Discover which SST backends and models are available."""
+    data = [{"id": s.model_id, "object": "model", "backend": s.backend}
+            for s in manager.catalog]
+    return {
+        "object": "list",
+        "data": data,
+        "default": manager.default_model,
+        "backends": manager.enabled_backends,
+    }
+
+
+@app.get("/v1/sst/voices")
+async def sst_voices(
+    model: str | None = None,
+    manager: SSTManager = Depends(get_sst_manager),
+):
+    """Capabilities of the active SST backend/model (languages, formats, …)."""
+    try:
+        spec = manager.resolve(model)
+    except UnknownModelError:
+        raise HTTPException(status_code=400, detail=f"Unknown model {model!r}")
+    caps = sst_engine_class(spec.backend).capabilities()
+    caps["model"] = spec.model_id
+    return caps
+
+
+# --------------------------------------------------------------------------- #
+# SST native endpoints                                                          #
+# --------------------------------------------------------------------------- #
+
+
+@app.post("/v1/sst", dependencies=[Depends(require_auth)])
+async def sst(
+    body: dict = Body(...),
+    manager: SSTManager = Depends(get_sst_manager),
+):
+    """Native speech-to-text endpoint.  Accepts ``audio`` (base64-encoded) + ``model``."""
+    raw_audio_val = body.get("audio", "")
+    if isinstance(raw_audio_val, str):
+        import base64 as _b64
+        padding = "=" * (-len(raw_audio_val) % 4)
+        raw_audio = _b64.urlsafe_b64decode(raw_audio_val + padding)
+    else:
+        raw_audio = bytes(raw_audio_val) if raw_audio_val else b""
+
+    if not raw_audio:
+        raise HTTPException(status_code=400, detail="'audio' field is required (base64)")
+
+    sst_model = body.get("model")
+    lang = body.get("language")
+
+    try:
+        synth = await manager.get(sst_model)
+    except UnknownModelError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model {exc.args[0]!r}. Available: {manager.available}",
+        )
+
+    # Admission control.
+    if synth.at_capacity:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=503, detail="server busy: queue is full")
+
+    text = await synth.transcribe(raw_audio)  # type: ignore[attr-defined]
+    fmt = body.get("response_format", "text")
+
+    if fmt == "segments":
+        return {"text": text, "segments": [s for s in text.split()]}
+    return {"text": text}
+
+
+@app.post("/v1/sst/stream", dependencies=[Depends(require_auth)])
+async def sst_stream(
+    body: dict = Body(...),
+    manager: SSTManager = Depends(get_sst_manager),
+):
+    """Streaming transcription.  Yields text segments as JSON frames."""
+    raw_audio_val = body.get("audio", "")
+    if isinstance(raw_audio_val, str):
+        import base64 as _b64
+        padding = "=" * (-len(raw_audio_val) % 4)
+        raw_audio = _b64.urlsafe_b64decode(raw_audio_val + padding)
+    else:
+        raw_audio = bytes(raw_audio_val) if raw_audio_val else b""
+
+    if not raw_audio:
+        raise HTTPException(status_code=400, detail="'audio' field is required (base64)")
+
+    sst_model = body.get("model")
+
+    try:
+        synth = await manager.get(sst_model)
+    except UnknownModelError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model {exc.args[0]!r}. Available: {manager.available}",
+        )
+
+    if synth.at_capacity:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=503, detail="server busy: queue is full")
+
+    async def segment_stream():
+        yield json.dumps({"type": "start", "model": synth.model_id}).encode() + b"\n"  # type: ignore[attr-defined]
+        try:
+            async for seg in synth.stream_text(raw_audio):  # type: ignore[attr-defined]
+                if seg.strip():
+                    yield (json.dumps({"type": "segment", "text": seg}) + "\n").encode()
+        except Exception as exc:
+            yield json.dumps({"type": "error", "message": str(exc)}).encode() + b"\n"
+        yield json.dumps({"type": "end"}).encode() + b"\n"
+
+    return StreamingResponse(segment_stream(), media_type="application/x-ndjson")
+
+
+@app.post("/v1/audio/transcriptions", dependencies=[Depends(require_auth)])
+async def openai_sst(
+    request: Request,
+    manager: SSTManager = Depends(get_sst_manager),
+):
+    """OpenAI-compatible transcription endpoint (drop-in).
+
+    Accepts ``multipart/form-data`` with a ``file`` field (audio) and optional
+    ``model``, ``language`` fields.  Mirrors the OpenAI ``/v1/audio/transcriptions`` API.
+    """
+    form = await request.form()
+    audio_bytes = b""
+    file_obj = form.get("file")
+    if isinstance(file_obj, UploadFile):
+        audio_bytes = await file_obj.read()
+    elif isinstance(file_obj, bytes) and file_obj:
+        audio_bytes = file_obj
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="'file' field is required (audio)")
+
+    lang = form.get("language")
+    fmt = form.get("response_format", "text")
+    sst_model = None
+    for k in ("model",):
+        val = form.get(k)
+        if val:
+            sst_model = val
+
+    try:
+        synth = await manager.get(sst_model)
+    except UnknownModelError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown model {exc.args[0]!r}. Available: {manager.available}",
+        )
+
+    if synth.at_capacity:  # type: ignore[attr-defined]
+        raise HTTPException(status_code=503, detail="server busy: queue is full")
+
+    text = await synth.transcribe(audio_bytes)  # type: ignore[attr-defined]
+
+    if fmt == "json" or fmt == "verbose_json":
+        return OpenAISSTResponse(text=text)
+    return Response(content=text, media_type="text/plain")
 
 
 # --------------------------------------------------------------------------- #
@@ -275,7 +469,7 @@ async def _run_ws_synthesis(
 @app.websocket("/v1/tts/ws")
 async def tts_ws(ws: WebSocket):
     settings = get_settings()
-    manager: EngineManager = ws.app.state.manager
+    manager: EngineManager = ws.app.state.tts_manager
 
     # Auth: browsers can't set headers on a WS, so accept ?api_key= too.
     authz = ws.headers.get("authorization")
