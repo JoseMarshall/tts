@@ -238,10 +238,10 @@ class Transcriber:
     between segments (like TTS does for PCM frames).
     """
 
-    def __init__(self, engine: "SSEngine", settings):  # accepts _SSTSettings
+    def __init__(self, engine: "SSEngine", settings):  # accepts _STTSettings
         self.engine = engine            # the loaded SSEngine instance
         self._language: str | None = None  # per-call language override set by handler
-        self.settings = settings        # shared server config (_SSTSettings)
+        self.settings = settings        # shared server config (_STTSettings)
         self._gpu_lock = asyncio.Semaphore(1)   # one generation at a time
         self._inflight = 0                        # queued + running requests
 

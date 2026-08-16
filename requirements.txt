@@ -27,10 +27,10 @@ numpy>=1.26
 # Multiple backends can be installed together and selected per request; see
 # TTS_BACKENDS in .env.example.
 #
-# --- Voice activity detection (/v1/sst_ws turn endpointing, optional) ---
+# --- Voice activity detection (/v1/stt_ws turn endpointing, optional) ---
 # Only needed if a client enables VAD; nothing is imported until then.
-#   SST_VAD=silero (default, accurate, runs on CPU):
+#   STT_VAD=silero (default, accurate, runs on CPU):
 #     pip install silero-vad torch
-#   SST_VAD=webrtc:
+#   STT_VAD=webrtc:
 #     pip install webrtcvad
-#   SST_VAD=energy needs nothing — it is the zero-dependency fallback.
+#   STT_VAD=energy needs nothing — it is the zero-dependency fallback.

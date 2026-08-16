@@ -58,32 +58,32 @@ They solve different problems — see [`deployment.md`](deployment.md).
 | `TTS_PORT` | `8000` | Bind port. |
 | `TTS_API_KEYS` | *(empty)* | Comma-separated bearer tokens. Empty = auth disabled. |
 
-### Speech-to-text (`SST_` prefix)
-The SST side has its own parallel settings — same shape, different prefix.
+### Speech-to-text (`STT_` prefix)
+The STT side has its own parallel settings — same shape, different prefix.
 
 | Variable | Default | Description |
 |---|---|---|
-| `SST_BACKEND` | `mock` | Default engine: `mock`, `voxtral`, `whisper`. |
-| `SST_BACKENDS` | *(empty)* | Extra backends clients may select by name. |
-| `SST_MODEL_ID` / `SST_MODELS` | *(empty)* | As their `TTS_` counterparts. |
-| `SST_SAMPLE_RATE` | `16000` | Expected input sample rate (Hz), reported on `ready`. |
-| `SST_MAX_QUEUE` | `32` | Max in-flight transcriptions before rejecting. |
-| `SST_DEVICE` / `SST_DTYPE` | `cuda:0` / `bfloat16` | GPU backends only. |
-| `SST_API_KEYS` | *(empty)* | Comma-separated bearer tokens. |
+| `STT_BACKEND` | `mock` | Default engine: `mock`, `voxtral`, `whisper`. |
+| `STT_BACKENDS` | *(empty)* | Extra backends clients may select by name. |
+| `STT_MODEL_ID` / `STT_MODELS` | *(empty)* | As their `TTS_` counterparts. |
+| `STT_SAMPLE_RATE` | `16000` | Expected input sample rate (Hz), reported on `ready`. |
+| `STT_MAX_QUEUE` | `32` | Max in-flight transcriptions before rejecting. |
+| `STT_DEVICE` / `STT_DTYPE` | `cuda:0` / `bfloat16` | GPU backends only. |
+| `STT_API_KEYS` | *(empty)* | Comma-separated bearer tokens. |
 
-### Voice activity detection (`/v1/sst_ws`)
+### Voice activity detection (`/v1/stt_ws`)
 Turn endpointing: transcribe when the *speaker* stops rather than when the
 client says so. See [`websocket.md`](websocket.md#turn-detection-hands-free-barge-in).
 
 | Variable | Default | Description |
 |---|---|---|
-| `SST_VAD` | `silero` | Detector to build when a session enables VAD: `silero` (accurate, CPU, needs `pip install silero-vad`), `energy` (no dependencies), `webrtc` (needs `pip install webrtcvad`). Nothing is imported until a session actually turns VAD on. |
-| `SST_VAD_AUTO_FLUSH` | `0` | Server-wide default for new sessions. Off because auto-flush changes session semantics; clients opt in per session with `init.vad.enabled`. |
-| `SST_VAD_THRESHOLD` | `0.5` | Speech probability at or above which a frame counts as speech. |
-| `SST_VAD_SPEECH_MS` | `120` | Consecutive speech needed to confirm onset. Rejects clicks and door slams. |
-| `SST_VAD_SILENCE_MS` | `700` | Trailing silence that ends a turn. The one knob most deployments actually tune. |
-| `SST_VAD_PRE_ROLL_MS` | `300` | Audio retained from *before* onset was confirmed, so the first phoneme is not clipped. |
-| `SST_VAD_MAX_UTTERANCE_S` | `30` | Hard cap on one turn. Also what bounds the audio buffer. |
+| `STT_VAD` | `silero` | Detector to build when a session enables VAD: `silero` (accurate, CPU, needs `pip install silero-vad`), `energy` (no dependencies), `webrtc` (needs `pip install webrtcvad`). Nothing is imported until a session actually turns VAD on. |
+| `STT_VAD_AUTO_FLUSH` | `0` | Server-wide default for new sessions. Off because auto-flush changes session semantics; clients opt in per session with `init.vad.enabled`. |
+| `STT_VAD_THRESHOLD` | `0.5` | Speech probability at or above which a frame counts as speech. |
+| `STT_VAD_SPEECH_MS` | `120` | Consecutive speech needed to confirm onset. Rejects clicks and door slams. |
+| `STT_VAD_SILENCE_MS` | `700` | Trailing silence that ends a turn. The one knob most deployments actually tune. |
+| `STT_VAD_PRE_ROLL_MS` | `300` | Audio retained from *before* onset was confirmed, so the first phoneme is not clipped. |
+| `STT_VAD_MAX_UTTERANCE_S` | `30` | Hard cap on one turn. Also what bounds the audio buffer. |
 
 Every one of these is overridable per session on the `init` frame's `vad` object.
 

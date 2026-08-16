@@ -91,13 +91,13 @@ class OpenAISpeechRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# SST (Speech-to-text) schemas                                                #
+# STT (Speech-to-text) schemas                                                #
 # --------------------------------------------------------------------------- #
 
 SstResponseFormat = Literal["text", "segments", "srt", "vtt"]
 
 
-class SSTRequest(BaseModel):
+class STTRequest(BaseModel):
     """Native speech-to-text request. Accepts audio and returns text or segments.
 
     The ``audio`` field is a base64-encoded WAV/FLAC/MP3/PCM buffer. On the wire
@@ -112,14 +112,14 @@ class SSTRequest(BaseModel):
     )
     model: Optional[str] = Field(
         None,
-        description="Which SST backend/model to use. Either a backend name "
+        description="Which STT backend/model to use. Either a backend name "
                     "(e.g. 'voxtral', 'whisper') or a model id (e.g. "
                     "'mistralai/Voxtral-Small-24B'). Omit for the server default.",
     )
     response_format: SstResponseFormat = "text"
 
 
-class OpenAISSTResponse(BaseModel):
+class OpenAISTTResponse(BaseModel):
     """Response model for the OpenAI-compatible '/v1/audio/transcriptions' endpoint.
 
     Mirrors OpenAI's ``/v1/audio/transcriptions`` response shape so clients can

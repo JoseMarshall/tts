@@ -16,9 +16,9 @@ os.environ["TTS_MODELS"] = ""
 os.environ["TTS_SAMPLE_RATE"] = "24000"
 os.environ["TTS_EMIT_MARKS"] = "1"     # WS marks enabled (default; override .env)
 
-# ---- SST isolation ---------------------------------------------------------
-os.environ["SST_BACKEND"] = "mock"      # never load a real model in tests
-os.environ["SST_BACKENDS"] = ""         # no extra backends enabled
-os.environ["SST_API_KEYS"] = ""         # auth disabled (override .env)
-os.environ["SST_MODEL_ID"] = ""         # -> mock's default model
-os.environ["SST_MODELS"] = ""
+# ---- STT isolation ---------------------------------------------------------
+os.environ["STT_BACKEND"] = "mock"      # never load a real model in tests
+os.environ["STT_BACKENDS"] = ""         # no extra backends enabled
+os.environ["STT_API_KEYS"] = ""         # auth disabled (override .env)
+os.environ["STT_MODEL_ID"] = ""         # -> mock's default model
+os.environ["STT_MODELS"] = ""

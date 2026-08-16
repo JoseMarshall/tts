@@ -1,6 +1,6 @@
-# Proposal — VAD auto-flush on `/v1/sst_ws`
+# Proposal — VAD auto-flush on `/v1/stt_ws`
 
-**Status:** implemented · **Affects:** new `app/vad.py`, `main.py` (`/v1/sst_ws` only),
+**Status:** implemented · **Affects:** new `app/vad.py`, `main.py` (`/v1/stt_ws` only),
 `config.py`, `docs/websocket.md`
 **Driven by:** hands-free turn-taking and barge-in — a voice agent that has to know
 when the user *stopped* talking, and when they *started* talking over the reply.
@@ -9,7 +9,7 @@ valuable server change.
 
 ## The problem
 
-`/v1/sst_ws` accumulates audio and transcribes only when the client says so:
+`/v1/stt_ws` accumulates audio and transcribes only when the client says so:
 
 ```python
 elif mtype == "flush":
@@ -48,7 +48,7 @@ receive loop has to stay hot.
 
 **2. The buffer is unbounded.** `audio_buf.append(...)` has no ceiling. A client that
 connects and streams without ever sending `flush` grows a list of `bytes` until the
-process dies. `SST_MAX_INPUT_SECONDS` exists in `config.py` and is read by nothing;
+process dies. `STT_MAX_INPUT_SECONDS` exists in `config.py` and is read by nothing;
 the per-engine `MAX_INPUT_SECONDS` only truncates at the point of transcription,
 long after the memory was spent. Auto-flush fixes this incidentally — a hard
 `max_utterance` cap means the buffer can no longer grow without bound — and that
@@ -123,7 +123,7 @@ model problem rather than a buffering one.
 
 ## Wire protocol
 
-Additive frames on `/v1/sst_ws`, under the forward-compatibility rule
+Additive frames on `/v1/stt_ws`, under the forward-compatibility rule
 `docs/websocket.md` already states (clients ignore unknown `type` values):
 
 ```jsonc
@@ -161,7 +161,7 @@ buffer, flush when the user releases the button — would start receiving `done`
 frames it never asked for, mid-utterance, and the second `flush` would find an
 empty buffer and get an error.
 
-So: `SST_VAD_AUTO_FLUSH=0` by default, opt in with `{"vad":{"enabled":true}}` on
+So: `STT_VAD_AUTO_FLUSH=0` by default, opt in with `{"vad":{"enabled":true}}` on
 `init`, and let an operator flip the server-wide default to `1` when every client
 on that deployment wants it. Explicit `flush` keeps working either way and ends the
 current turn immediately.
@@ -169,20 +169,20 @@ current turn immediately.
 ## Configuration
 
 ```
-SST_VAD=silero               # silero | energy | webrtc — which detector to build
-SST_VAD_AUTO_FLUSH=0         # server-wide default for new sessions
-SST_VAD_THRESHOLD=0.5        # speech_prob above this counts as speech
-SST_VAD_SPEECH_MS=120
-SST_VAD_SILENCE_MS=700
-SST_VAD_PRE_ROLL_MS=300
-SST_VAD_MAX_UTTERANCE_S=30
+STT_VAD=silero               # silero | energy | webrtc — which detector to build
+STT_VAD_AUTO_FLUSH=0         # server-wide default for new sessions
+STT_VAD_THRESHOLD=0.5        # speech_prob above this counts as speech
+STT_VAD_SPEECH_MS=120
+STT_VAD_SILENCE_MS=700
+STT_VAD_PRE_ROLL_MS=300
+STT_VAD_MAX_UTTERANCE_S=30
 ```
 
-`SST_VAD=silero` names the default detector, but nothing imports `silero_vad` until
+`STT_VAD=silero` names the default detector, but nothing imports `silero_vad` until
 a session actually enables VAD — the same lazy-import discipline every engine
 already follows, so the server still starts on a machine with no optional packages
 installed. When the import fails the error names the pip package and says
-`SST_VAD=energy` is the zero-dependency path.
+`STT_VAD=energy` is the zero-dependency path.
 
 ## The one subtle part
 
@@ -211,7 +211,7 @@ detector sees garbage at every chunk boundary, which shows up as a threshold tha
   grammatically unfinished requires a language model in the audio path. That is a
   different, much larger proposal, and 700 ms of silence covers most of the value.
 - **Diarization.** Who is speaking is a separate model and a separate proposal.
-- **VAD on the HTTP endpoints.** `/v1/sst` and `/v1/sst/stream` receive a complete
+- **VAD on the HTTP endpoints.** `/v1/stt` and `/v1/stt/stream` receive a complete
   buffer; there is no turn to detect. Trimming leading and trailing silence there
   is a different optimisation.
 - **Server-side barge-in orchestration.** The server emits `speech_start`. Deciding
@@ -232,9 +232,9 @@ detector sees garbage at every chunk boundary, which shows up as a threshold tha
    turn finishes and delivers its `done`. Ordering within a session is preserved.
    `cancel` now signals queued *and* in-flight turns, so a client that has moved
    on can drop them rather than waiting.
-3. **Should `SST_MAX_INPUT_SECONDS` be wired up at the same time?** Left alone.
-   `SST_VAD_MAX_UTTERANCE_S` bounds the buffer on the socket path, which was the
-   actual hazard; `SST_MAX_INPUT_SECONDS` remains dead config on the HTTP path
+3. **Should `STT_MAX_INPUT_SECONDS` be wired up at the same time?** Left alone.
+   `STT_VAD_MAX_UTTERANCE_S` bounds the buffer on the socket path, which was the
+   actual hazard; `STT_MAX_INPUT_SECONDS` remains dead config on the HTTP path
    and should be either wired up or deleted in its own change.
 
 ## What shipped, and what didn't
@@ -248,7 +248,7 @@ Implemented as described, with two deliberate deviations:
   Still bounded, because the pre-roll ring is capped.
 - **A detector that fails to load degrades the session, not the endpoint.** One
   `error` frame, VAD off, manual `flush` still works. An operator who sets
-  `SST_VAD=silero` without installing it should lose auto-flush, not the socket.
+  `STT_VAD=silero` without installing it should lose auto-flush, not the socket.
 
 Also folded in, because the rework touched them: `_run_ws_transcription()` (dead
 since it was written, and it swallowed every exception) is gone, replaced by the

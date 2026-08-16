@@ -1,4 +1,4 @@
-"""Tests for voice activity detection and turn endpointing on /v1/sst_ws.
+"""Tests for voice activity detection and turn endpointing on /v1/stt_ws.
 
 Split into two halves on purpose:
 
@@ -218,8 +218,8 @@ def _drain_until(ws, wanted, limit=200):
     pytest.fail(f"never saw {wanted}; got {[m['type'] for m in seen]}")
 
 
-def test_sst_ws_ready_advertises_vad(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_ready_advertises_vad(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ready = ws.receive_json()
         vad = ready["vad"]
         assert vad["available"] is True
@@ -229,8 +229,8 @@ def test_sst_ws_ready_advertises_vad(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_init_echoes_vad_config(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_init_echoes_vad_config(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_json({"type": "init", "model": "mock",
                       "vad": {"enabled": True, "backend": "energy",
@@ -243,9 +243,9 @@ def test_sst_ws_init_echoes_vad_config(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_vad_auto_flush(client):
+def test_stt_ws_vad_auto_flush(client):
     """Speech then silence transcribes with no explicit flush at all."""
-    with client.websocket_connect("/v1/sst_ws") as ws:
+    with client.websocket_connect("/v1/stt_ws") as ws:
         assert ws.receive_json()["type"] == "ready"
         ws.send_json({"type": "init", "model": "mock", "vad": {
             "enabled": True, "backend": "energy",
@@ -270,9 +270,9 @@ def test_sst_ws_vad_auto_flush(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_vad_max_utterance_bounds_the_buffer(client):
+def test_stt_ws_vad_max_utterance_bounds_the_buffer(client):
     """A client that talks forever and never flushes still gets cut off."""
-    with client.websocket_connect("/v1/sst_ws") as ws:
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_json({"type": "init", "model": "mock", "vad": {
             "enabled": True, "backend": "energy",
@@ -288,8 +288,8 @@ def test_sst_ws_vad_max_utterance_bounds_the_buffer(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_explicit_flush_still_works_with_vad_on(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_explicit_flush_still_works_with_vad_on(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_json({"type": "init", "model": "mock", "vad": {
             "enabled": True, "backend": "energy", "speech_ms": 60,
@@ -306,7 +306,7 @@ def test_sst_ws_explicit_flush_still_works_with_vad_on(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_vad_build_failure_falls_back_to_manual(client, monkeypatch):
+def test_stt_ws_vad_build_failure_falls_back_to_manual(client, monkeypatch):
     """A detector that will not load costs the session auto-flush, not the socket."""
     import app.main as main_mod
 
@@ -315,7 +315,7 @@ def test_sst_ws_vad_build_failure_falls_back_to_manual(client, monkeypatch):
 
     monkeypatch.setattr(main_mod, "build_vad", _boom)
 
-    with client.websocket_connect("/v1/sst_ws") as ws:
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_json({"type": "init", "model": "mock", "vad": {"enabled": True}})
         ws.receive_json()
@@ -332,9 +332,9 @@ def test_sst_ws_vad_build_failure_falls_back_to_manual(client, monkeypatch):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_vad_off_by_default_is_unchanged(client):
+def test_stt_ws_vad_off_by_default_is_unchanged(client):
     """Without opting in, audio is buffered until an explicit flush."""
-    with client.websocket_connect("/v1/sst_ws") as ws:
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_bytes(_tone_pcm(0.3))
         ws.send_bytes(_silence_pcm(0.5))       # would auto-flush if VAD were on
@@ -346,8 +346,8 @@ def test_sst_ws_vad_off_by_default_is_unchanged(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_cancel_drops_pending_audio(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_cancel_drops_pending_audio(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_bytes(_tone_pcm(0.2))
         ws.send_json({"type": "cancel"})

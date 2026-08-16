@@ -168,7 +168,7 @@ N is not something an operator should have to infer from `nvidia-smi`.
   failover, rolling restarts, or more than one machine. `docs/deployment.md` keeps
   its scale-out guidance and gains a paragraph on when to reach for which — this is
   for filling a GPU you already paid for, not for surviving one dying.
-- **Concurrency on the SST side.** `Transcriber` has the identical
+- **Concurrency on the STT side.** `Transcriber` has the identical
   `Semaphore(1)` and would take the identical treatment, but ASR models are large
   enough that a second instance rarely fits. Separate decision, separate evidence.
 

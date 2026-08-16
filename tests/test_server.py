@@ -21,7 +21,7 @@ from app.engine import (
     available_backends,
     engine_class,
     kokoro_lang_code,
-    sst_available_backends,
+    stt_available_backends,
 )
 from app.main import app
 from app.schemas import TTSRequest
@@ -518,20 +518,20 @@ def test_ws_start_advertises_supports_marks(client):
         ws.send_json({"type": "close"})
 
 
-# ---- SST endpoint tests ---------------------------------------------------- #
+# ---- STT endpoint tests ---------------------------------------------------- #
 
 
-def test_health_includes_sst(client):
+def test_health_includes_stt(client):
     r = client.get("/health")
     body = r.json()
     assert body["status"] == "ok"
-    assert "sst_default_model" in body
-    assert "sst_enabled_backends" in body
-    assert isinstance(body["sst_catalog"], list)
+    assert "stt_default_model" in body
+    assert "stt_enabled_backends" in body
+    assert isinstance(body["stt_catalog"], list)
 
 
-def test_sst_models_endpoint(client):
-    r = client.get("/v1/sst/models")
+def test_stt_models_endpoint(client):
+    r = client.get("/v1/stt/models")
     body = r.json()
     assert body["object"] == "list"
     assert "default" in body
@@ -540,47 +540,47 @@ def test_sst_models_endpoint(client):
     assert "mock" in body["backends"]
 
 
-def test_sst_voices_endpoint(client):
-    r = client.get("/v1/sst/voices")
+def test_stt_voices_endpoint(client):
+    r = client.get("/v1/stt/voices")
     body = r.json()
     assert body["backend"] == "mock"
     assert isinstance(body["languages"], list)
     assert isinstance(body["supported_formats"], list)
 
 
-def test_native_sst_endpoint(client):
+def test_native_stt_endpoint(client):
     audio_bytes = b"\x00" * 320
     encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
-    r = client.post("/v1/sst", json={"audio": encoded})
+    r = client.post("/v1/stt", json={"audio": encoded})
     assert r.status_code == 200
     body = r.json()
     assert "text" in body
     assert len(body["text"]) > 0
 
 
-def test_native_sst_endpoint_segments(client):
+def test_native_stt_endpoint_segments(client):
     audio_bytes = b"\x00" * 320
     encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
-    r = client.post("/v1/sst", json={"audio": encoded, "response_format": "segments"})
+    r = client.post("/v1/stt", json={"audio": encoded, "response_format": "segments"})
     assert r.status_code == 200
     body = r.json()
     assert "text" in body
     assert "segments" in body
 
 
-def test_native_sst_endpoint_text(client):
+def test_native_stt_endpoint_text(client):
     audio_bytes = b"\x00" * 320
     encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
-    r = client.post("/v1/sst", json={"audio": encoded, "response_format": "text"})
+    r = client.post("/v1/stt", json={"audio": encoded, "response_format": "text"})
     assert r.status_code == 200
     body = r.json()
     assert "text" in body
 
 
-def test_openai_sst_endpoint(client):
+def test_openai_stt_endpoint(client):
     """Verify the OpenAI-compatible /v1/audio/transcriptions endpoint accepts files."""
     # Create a minimal WAV audio file for the multipart upload.
     wav_buf = io.BytesIO()
@@ -598,7 +598,7 @@ def test_openai_sst_endpoint(client):
     assert r.status_code == 200
 
 
-def test_openai_sst_endpoint_verbose(client):
+def test_openai_stt_endpoint_verbose(client):
     """OpenAI-compatible endpoint should return verbose_json when requested."""
     wav_buf = io.BytesIO()
     with wave.open(wav_buf, "wb") as wf:
@@ -615,7 +615,7 @@ def test_openai_sst_endpoint_verbose(client):
     assert r.status_code == 200
 
 
-def test_openai_sst_endpoint_no_file(client):
+def test_openai_stt_endpoint_no_file(client):
     """/v1/audio/transcriptions should reject requests without audio."""
     r = client.post(
         "/v1/audio/transcriptions",
@@ -624,11 +624,11 @@ def test_openai_sst_endpoint_no_file(client):
     assert r.status_code == 400
 
 
-def test_streaming_sst_endpoint(client):
+def test_streaming_stt_endpoint(client):
     audio_bytes = b"\x00" * 320
     encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
-    r = client.post("/v1/sst/stream", json={"audio": encoded})
+    r = client.post("/v1/stt/stream", json={"audio": encoded})
     assert r.status_code == 200
     # NDJSON: "start\\n" ... segment lines ... "end\\n"
     text_body = r.content.decode()
@@ -636,82 +636,82 @@ def test_streaming_sst_endpoint(client):
     assert "end" in text_body.lower()
 
 
-def test_sst_unknown_model(client):
-    r = client.post("/v1/sst", json={"audio": "dGVzdA==", "model": "nonexistent"})
+def test_stt_unknown_model(client):
+    r = client.post("/v1/stt", json={"audio": "dGVzdA==", "model": "nonexistent"})
     assert r.status_code == 400
 
 
-def test_sst_missing_audio_fields(client):
-    # POST /v1/sst requires 'audio' field in the body.
-    r = client.post("/v1/sst", json={"model": "mock"})
+def test_stt_missing_audio_fields(client):
+    # POST /v1/stt requires 'audio' field in the body.
+    r = client.post("/v1/stt", json={"model": "mock"})
     assert r.status_code == 422
 
 
-def test_sst_empty_audio(client):
-    r = client.post("/v1/sst", json={"audio": ""})
+def test_stt_empty_audio(client):
+    r = client.post("/v1/stt", json={"audio": ""})
     assert r.status_code == 400
     body = r.json()
     assert "audio" in body.get("detail", "").lower() or "required" in body.get("detail", "").lower()
 
 
-def test_sst_stream_no_start_end(client):
+def test_stt_stream_no_start_end(client):
     audio_bytes = b"\x00" * 320
     encoded = _b64.urlsafe_b64encode(audio_bytes).decode()
 
-    r = client.post("/v1/sst/stream", json={"audio": encoded})
+    r = client.post("/v1/stt/stream", json={"audio": encoded})
     text = r.content.decode()
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     assert lines  # must have at least one frame
 
 
-# ---- SST regressions ------------------------------------------------------- #
-def test_sst_unknown_model_error_is_a_400_not_a_500():
-    """SSTUnknownModelError must be catchable as UnknownModelError.
+# ---- STT regressions ------------------------------------------------------- #
+def test_stt_unknown_model_error_is_a_400_not_a_500():
+    """STTUnknownModelError must be catchable as UnknownModelError.
 
     The route handlers all `except UnknownModelError` to return 400. While
-    these were siblings, an SST miss sailed past them into a 500 — hidden only
+    these were siblings, an STT miss sailed past them into a 500 — hidden only
     because the mock backend used to accept every model name.
     """
-    from app.manager import SSTUnknownModelError, UnknownModelError
-    assert issubclass(SSTUnknownModelError, UnknownModelError)
+    from app.manager import STTUnknownModelError, UnknownModelError
+    assert issubclass(STTUnknownModelError, UnknownModelError)
 
 
-def test_sst_manager_rejects_unknown_models_under_mock():
-    from app.config import _SSTSettings
-    from app.manager import SSTManager, SSTUnknownModelError
-    mgr = SSTManager(_SSTSettings(backend="mock", backends="", model_id="", models=""))
+def test_stt_manager_rejects_unknown_models_under_mock():
+    from app.config import _STTSettings
+    from app.manager import STTManager, STTUnknownModelError
+    mgr = STTManager(_STTSettings(backend="mock", backends="", model_id="", models=""))
     assert mgr.resolve("mock").backend == "mock"
     assert mgr.resolve(None) == mgr.default_spec
-    with pytest.raises(SSTUnknownModelError):
+    with pytest.raises(STTUnknownModelError):
         mgr.resolve("nonexistent")
 
 
-def test_sst_stream_unknown_model(client):
+def test_stt_stream_unknown_model(client):
     # Same rejection on the streaming endpoint: the 400 happens before the
     # StreamingResponse starts, so it can still be a status code.
-    r = client.post("/v1/sst/stream",
+    r = client.post("/v1/stt/stream",
                     json={"audio": "dGVzdA==", "model": "nonexistent"})
     assert r.status_code == 400
 
 
-def test_sst_voices_unknown_model(client):
-    r = client.get("/v1/sst/voices", params={"model": "nonexistent"})
+def test_stt_voices_unknown_model(client):
+    r = client.get("/v1/stt/voices", params={"model": "nonexistent"})
     assert r.status_code == 400
 
 
 @pytest.mark.parametrize("bad", ["!!!not base64!!!", "!!!nope!!!", "@@@@"])
-def test_sst_invalid_base64(client, bad):
+def test_stt_invalid_base64(client, bad):
     """Garbage must be rejected, not quietly salvaged.
 
     `urlsafe_b64decode` without validate=True DISCARDS out-of-alphabet
     characters, so "!!!nope!!!" decoded to three stray bytes and returned 200.
     """
-    r = client.post("/v1/sst", json={"audio": bad})
+    r = client.post("/v1/stt", json={"audio": bad})
     assert r.status_code == 400
     assert "base64" in r.json()["detail"].lower()
 
 
-def test_sst_accepts_both_base64_alphabets(client):
+def test_stt_accepts_both_base64_alphabets(client):
     """Standard and URL-safe base64 of the same bytes must transcribe alike.
 
     Bytes like b'\\xfb\\xff' encode with '+' and '/' in the standard alphabet.
@@ -723,14 +723,14 @@ def test_sst_accepts_both_base64_alphabets(client):
     urlsafe = _b64.urlsafe_b64encode(raw).decode()
     assert ("+" in standard or "/" in standard), "test data must exercise +/"
 
-    a = client.post("/v1/sst", json={"audio": standard})
-    b = client.post("/v1/sst", json={"audio": urlsafe})
+    a = client.post("/v1/stt", json={"audio": standard})
+    b = client.post("/v1/stt", json={"audio": urlsafe})
     assert a.status_code == 200 and b.status_code == 200
     assert a.json()["text"] == b.json()["text"]
 
 
-def test_sst_ws_rejects_invalid_base64_chunk(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_rejects_invalid_base64_chunk(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ws.receive_json()
         ws.send_json({"type": "chunk", "data": "!!!nope!!!"})
         err = ws.receive_json()
@@ -738,12 +738,12 @@ def test_sst_ws_rejects_invalid_base64_chunk(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_stream_missing_audio_is_422(client):
-    # Same schema as /v1/sst, so the same distinction: absent field = 422.
-    assert client.post("/v1/sst/stream", json={"model": "mock"}).status_code == 422
+def test_stt_stream_missing_audio_is_422(client):
+    # Same schema as /v1/stt, so the same distinction: absent field = 422.
+    assert client.post("/v1/stt/stream", json={"model": "mock"}).status_code == 422
 
 
-def test_openai_sst_returns_the_transcript(client):
+def test_openai_stt_returns_the_transcript(client):
     """The multipart upload must actually reach the engine.
 
     `isinstance(file_obj, fastapi.UploadFile)` was false for every real upload
@@ -766,7 +766,7 @@ def test_openai_sst_returns_the_transcript(client):
     assert r.text.strip(), "expected a transcript, not an empty body"
 
 
-def test_openai_sst_json_shape(client):
+def test_openai_stt_json_shape(client):
     wav_buf = io.BytesIO()
     with wave.open(wav_buf, "wb") as wf:
         wf.setnchannels(1)
@@ -783,7 +783,7 @@ def test_openai_sst_json_shape(client):
     assert r.json()["text"].strip()
 
 
-def test_openai_sst_unknown_model(client):
+def test_openai_stt_unknown_model(client):
     wav_buf = io.BytesIO()
     with wave.open(wav_buf, "wb") as wf:
         wf.setnchannels(1)
@@ -799,10 +799,10 @@ def test_openai_sst_unknown_model(client):
     assert r.status_code == 400
 
 
-# ---- SST WebSocket tests --------------------------------------------------- #
+# ---- STT WebSocket tests --------------------------------------------------- #
 
-def test_sst_ws_connect_and_ready(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_connect_and_ready(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         assert "models" in ready
@@ -811,8 +811,8 @@ def test_sst_ws_connect_and_ready(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_config_and_transcribe(client):
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_config_and_transcribe(client):
+    with client.websocket_connect("/v1/stt_ws") as ws:
         # Connect → config → start → chunk → flush → done → close
         ready = ws.receive_json()
         assert ready["type"] == "ready"
@@ -854,9 +854,9 @@ def test_sst_ws_config_and_transcribe(client):
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_binary_audio(client):
+def test_stt_ws_binary_audio(client):
     """Client can send raw binary PCM instead of base64."""
-    with client.websocket_connect("/v1/sst_ws") as ws:
+    with client.websocket_connect("/v1/stt_ws") as ws:
         assert ws.receive_json()["type"] == "ready"
         ws.send_json({"type": "start"})
 
@@ -878,17 +878,17 @@ def test_sst_ws_binary_audio(client):
         assert done_fired
 
 
-def test_sst_ws_endpoint(client):
-    """SST WebSocket endpoint handles sessions properly."""
-    with client.websocket_connect("/v1/sst_ws") as ws:
+def test_stt_ws_endpoint(client):
+    """STT WebSocket endpoint handles sessions properly."""
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         ws.send_json({"type": "close"})
 
 
-def test_sst_ws_binary(client):
+def test_stt_ws_binary(client):
     """WS client can send raw binary PCM and get segments back."""
-    with client.websocket_connect("/v1/sst_ws") as ws:
+    with client.websocket_connect("/v1/stt_ws") as ws:
         ready = ws.receive_json()
         assert ready["type"] == "ready"
         ws.send_json({"type": "start"})

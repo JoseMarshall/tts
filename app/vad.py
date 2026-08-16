@@ -1,4 +1,4 @@
-"""Voice activity detection and turn endpointing for ``/v1/sst_ws``.
+"""Voice activity detection and turn endpointing for ``/v1/stt_ws``.
 
 Two layers, deliberately separate:
 
@@ -97,7 +97,7 @@ class VAD(abc.ABC):
         if self.SAMPLE_RATES and sample_rate not in self.SAMPLE_RATES:
             raise ValueError(
                 f"{self.NAME} VAD supports {self.SAMPLE_RATES} Hz, got {sample_rate}. "
-                f"Resample the input or choose another SST_VAD."
+                f"Resample the input or choose another STT_VAD."
             )
         self.sample_rate = sample_rate
         # Window size this detector wants, in samples. Subclasses set it.
@@ -172,8 +172,8 @@ class SileroVAD(VAD):
             from silero_vad import load_silero_vad
         except ImportError as exc:  # pragma: no cover - depends on environment
             raise RuntimeError(
-                "SST_VAD=silero needs the 'silero-vad' package "
-                "(pip install silero-vad torch). Set SST_VAD=energy for the "
+                "STT_VAD=silero needs the 'silero-vad' package "
+                "(pip install silero-vad torch). Set STT_VAD=energy for the "
                 "zero-dependency detector."
             ) from exc
 
@@ -213,8 +213,8 @@ class WebrtcVAD(VAD):
             import webrtcvad
         except ImportError as exc:  # pragma: no cover - depends on environment
             raise RuntimeError(
-                "SST_VAD=webrtc needs the 'webrtcvad' package "
-                "(pip install webrtcvad). Set SST_VAD=energy for the "
+                "STT_VAD=webrtc needs the 'webrtcvad' package "
+                "(pip install webrtcvad). Set STT_VAD=energy for the "
                 "zero-dependency detector."
             ) from exc
         self._vad = webrtcvad.Vad(int(aggressiveness))

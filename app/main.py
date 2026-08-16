@@ -23,10 +23,10 @@ from fastapi.responses import Response, StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .audio import CONTENT_TYPES, pcm_to_wav, wav_header
-from .config import Settings, get_settings, get_sst_settings
-from .engine import Mark, available_backends, engine_class, sst_available_backends, sst_engine_class
-from .manager import EngineManager, SSTManager, UnknownModelError
-from .schemas import OpenAISpeechRequest, OpenAISSTResponse, SSTRequest, TTSRequest
+from .config import Settings, get_settings, get_stt_settings
+from .engine import Mark, available_backends, engine_class, stt_available_backends, stt_engine_class
+from .manager import EngineManager, STTManager, UnknownModelError
+from .schemas import OpenAISpeechRequest, OpenAISTTResponse, STTRequest, TTSRequest
 from .streaming import Synthesizer
 from .vad import TurnDetector, available_vads, build_vad
 
@@ -40,7 +40,7 @@ log = logging.getLogger("tts")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    sst_settings = get_sst_settings()
+    stt_settings = get_stt_settings()
 
     # Validate TTS backend at startup.
     if settings.backend not in available_backends():
@@ -50,19 +50,19 @@ async def lifespan(app: FastAPI):
         )
 
     manager = EngineManager(settings)
-    sst_manager = SSTManager(sst_settings)  # type: ignore[arg-type]
+    stt_manager = STTManager(stt_settings)  # type: ignore[arg-type]
 
     app.state.tts_manager = manager
-    app.state.sst_manager = sst_manager
+    app.state.stt_manager = stt_manager
 
     log.info("Starting TTS server (default=%s, backends=%s, catalog=%s)",
              manager.default_spec.key, manager.enabled_backends,
              [s.key for s in manager.catalog])
-    log.info("SST defaults: backend=%s models=%s",
-             sst_manager.default_spec.key, sst_manager.enabled_backends)
+    log.info("STT defaults: backend=%s models=%s",
+             stt_manager.default_spec.key, stt_manager.enabled_backends)
 
     await manager.preload_default()
-    await sst_manager.preload_default()
+    await stt_manager.preload_default()
     yield
     log.info("Shutting down.")
 
@@ -82,8 +82,8 @@ def get_tts_manager(request: Request) -> EngineManager:
     return request.app.state.tts_manager
 
 
-def get_sst_manager(request: Request) -> SSTManager:
-    return request.app.state.sst_manager
+def get_stt_manager(request: Request) -> STTManager:
+    return request.app.state.stt_manager
 
 
 async def resolve_synth(manager: EngineManager, model: str | None) -> Synthesizer:
@@ -142,11 +142,11 @@ async def health(
         # setting take effect" and "why is this still serialised" are the same
         # question, and VRAM x N should not have to be inferred from nvidia-smi.
         "replicas": {k: s.pool.size for k, s in manager._synths.items()},
-        # SST health ──────────────────────────────────────────────────────────
-        "sst_default_model": app.state.sst_manager.default_spec.key,
-        "sst_enabled_backends": app.state.sst_manager.enabled_backends,
-        "sst_catalog": [{"id": s.model_id, "backend": s.backend}
-                        for s in app.state.sst_manager.catalog],
+        # STT health ──────────────────────────────────────────────────────────
+        "stt_default_model": app.state.stt_manager.default_spec.key,
+        "stt_enabled_backends": app.state.stt_manager.enabled_backends,
+        "stt_catalog": [{"id": s.model_id, "backend": s.backend}
+                        for s in app.state.stt_manager.catalog],
     }
 
 
@@ -245,15 +245,15 @@ async def openai_speech(
 
 
 # --------------------------------------------------------------------------- #
-# SST introspection                                                             #
+# STT introspection                                                             #
 # --------------------------------------------------------------------------- #
 
 
-@app.get("/v1/sst/models")
-async def sst_models(
-    manager: SSTManager = Depends(get_sst_manager),
+@app.get("/v1/stt/models")
+async def stt_models(
+    manager: STTManager = Depends(get_stt_manager),
 ):
-    """Discover which SST backends and models are available."""
+    """Discover which STT backends and models are available."""
     data = [{"id": s.model_id, "object": "model", "backend": s.backend}
             for s in manager.catalog]
     return {
@@ -264,23 +264,23 @@ async def sst_models(
     }
 
 
-@app.get("/v1/sst/voices")
-async def sst_voices(
+@app.get("/v1/stt/voices")
+async def stt_voices(
     model: str | None = None,
-    manager: SSTManager = Depends(get_sst_manager),
+    manager: STTManager = Depends(get_stt_manager),
 ):
-    """Capabilities of the active SST backend/model (languages, formats, …)."""
+    """Capabilities of the active STT backend/model (languages, formats, …)."""
     try:
         spec = manager.resolve(model)
     except UnknownModelError:
         raise HTTPException(status_code=400, detail=f"Unknown model {model!r}")
-    caps = sst_engine_class(spec.backend).capabilities()
+    caps = stt_engine_class(spec.backend).capabilities()
     caps["model"] = spec.model_id
     return caps
 
 
 # --------------------------------------------------------------------------- #
-# SST native endpoints                                                          #
+# STT native endpoints                                                          #
 # --------------------------------------------------------------------------- #
 
 
@@ -315,8 +315,8 @@ def _decode_audio_field(value: str) -> bytes:
         )
 
 
-async def _resolve_transcriber(manager: SSTManager, model: str | None):
-    """Shared lookup + admission control for the native SST endpoints."""
+async def _resolve_transcriber(manager: STTManager, model: str | None):
+    """Shared lookup + admission control for the native STT endpoints."""
     try:
         transcriber = await manager.get(model)
     except UnknownModelError as exc:
@@ -329,14 +329,14 @@ async def _resolve_transcriber(manager: SSTManager, model: str | None):
     return transcriber
 
 
-@app.post("/v1/sst", dependencies=[Depends(require_auth)])
-async def sst(
-    req: SSTRequest,
-    manager: SSTManager = Depends(get_sst_manager),
+@app.post("/v1/stt", dependencies=[Depends(require_auth)])
+async def stt(
+    req: STTRequest,
+    manager: STTManager = Depends(get_stt_manager),
 ):
     """Native speech-to-text endpoint. Accepts ``audio`` (base64) + ``model``.
 
-    Validation comes from :class:`SSTRequest`, so a body missing ``audio``
+    Validation comes from :class:`STTRequest`, so a body missing ``audio``
     is a 422 (the schema was violated) rather than a hand-rolled 400. A
     *present but empty* or undecodable ``audio`` is still a 400 — the shape is
     right, the content is not.
@@ -354,10 +354,10 @@ async def sst(
     return {"text": text}
 
 
-@app.post("/v1/sst/stream", dependencies=[Depends(require_auth)])
-async def sst_stream(
-    req: SSTRequest,
-    manager: SSTManager = Depends(get_sst_manager),
+@app.post("/v1/stt/stream", dependencies=[Depends(require_auth)])
+async def stt_stream(
+    req: STTRequest,
+    manager: STTManager = Depends(get_stt_manager),
 ):
     """Streaming transcription.  Yields text segments as JSON frames."""
     raw_audio = _decode_audio_field(req.audio)
@@ -381,9 +381,9 @@ async def sst_stream(
 
 
 @app.post("/v1/audio/transcriptions", dependencies=[Depends(require_auth)])
-async def openai_sst(
+async def openai_stt(
     request: Request,
-    manager: SSTManager = Depends(get_sst_manager),
+    manager: STTManager = Depends(get_stt_manager),
 ):
     """OpenAI-compatible transcription endpoint (drop-in).
 
@@ -407,14 +407,14 @@ async def openai_sst(
     # form.get() returns str OR UploadFile; only strings mean anything here.
     lang = _form_str(form, "language")
     fmt = _form_str(form, "response_format") or "text"
-    sst_model = _form_str(form, "model")
+    stt_model = _form_str(form, "model")
 
-    synth = await _resolve_transcriber(manager, sst_model)
+    synth = await _resolve_transcriber(manager, stt_model)
     synth.set_language(lang)  # type: ignore[attr-defined]
     text = await synth.transcribe(audio_bytes)  # type: ignore[attr-defined]
 
     if fmt in ("json", "verbose_json"):
-        return OpenAISSTResponse(text=text)
+        return OpenAISTTResponse(text=text)
     return Response(content=text, media_type="text/plain")
 
 
@@ -583,7 +583,7 @@ async def tts_ws(ws: WebSocket):
 
 
 # --------------------------------------------------------------------------- #
-# WebSocket endpoint: /v1/sst_ws  (streaming audio-in → text-out)
+# WebSocket endpoint: /v1/stt_ws  (streaming audio-in → text-out)
 # --------------------------------------------------------------------------- #
 #
 # Protocol (all text frames are JSON; binary frames carry raw PCM audio):
@@ -618,9 +618,9 @@ _VAD_FIELDS = {
 }
 
 
-def _vad_defaults(sst_settings) -> dict:
+def _vad_defaults(stt_settings) -> dict:
     """The server-wide VAD config a new session starts from."""
-    cfg = {k: getattr(sst_settings, attr) for k, attr in _VAD_FIELDS.items()}
+    cfg = {k: getattr(stt_settings, attr) for k, attr in _VAD_FIELDS.items()}
     cfg["enabled"] = bool(cfg["enabled"])
     return cfg
 
@@ -641,7 +641,7 @@ def _build_turn_detector(cfg: dict, sample_rate: int) -> TurnDetector:
 
 
 async def _transcribe_turn(
-    ws: WebSocket, manager: SSTManager, session: dict, turn: dict,
+    ws: WebSocket, manager: STTManager, session: dict, turn: dict,
 ) -> None:
     """Transcribe one turn's audio and send its frames.
 
@@ -689,8 +689,8 @@ async def _transcribe_turn(
     })
 
 
-async def _sst_turn_worker(
-    ws: WebSocket, manager: SSTManager, session: dict, turns: asyncio.Queue,
+async def _stt_turn_worker(
+    ws: WebSocket, manager: STTManager, session: dict, turns: asyncio.Queue,
 ) -> None:
     """Drain queued turns one at a time, off the receive loop.
 
@@ -708,18 +708,18 @@ async def _sst_turn_worker(
         except (WebSocketDisconnect, RuntimeError):
             return  # socket gone; stop quietly
         except Exception:
-            log.exception("SST turn failed")
+            log.exception("STT turn failed")
 
 
-@app.websocket("/v1/sst_ws")
-async def sst_ws_endpoint(ws: WebSocket):
+@app.websocket("/v1/stt_ws")
+async def stt_ws_endpoint(ws: WebSocket):
     """Real-time Speech-to-Text via WebSocket.
 
     Clients stream audio chunks to the server and receive transcribed text
     segments concurrently (as soon as any engine produces them).
     """
     settings = get_settings()
-    manager: SSTManager = ws.app.state.sst_manager
+    manager: STTManager = ws.app.state.stt_manager
 
     # Auth (WS can't set Headers, so accept ?api_key=)
     authz = ws.headers.get("authorization")
@@ -733,9 +733,9 @@ async def sst_ws_endpoint(ws: WebSocket):
     await ws.accept()
 
     # ---- per-session state ----------------------------------------------------
-    sst_settings = get_sst_settings()
-    sample_rate = sst_settings.sample_rate
-    vad_cfg = _vad_defaults(sst_settings)
+    stt_settings = get_stt_settings()
+    sample_rate = stt_settings.sample_rate
+    vad_cfg = _vad_defaults(stt_settings)
 
     await ws.send_json({
         "type": "ready",
@@ -746,17 +746,17 @@ async def sst_ws_endpoint(ws: WebSocket):
     })
 
     audio_buf: list[bytes] = []          # used only while VAD is off
-    session: dict = {"model": None, "language": sst_settings.default_language or None}
+    session: dict = {"model": None, "language": stt_settings.default_language or None}
     detector: TurnDetector | None = None
     turns: asyncio.Queue = asyncio.Queue()
-    worker = asyncio.create_task(_sst_turn_worker(ws, manager, session, turns))
+    worker = asyncio.create_task(_stt_turn_worker(ws, manager, session, turns))
     cancels: list[threading.Event] = []   # cancel handles for queued/running turns
 
     async def _ensure_detector() -> TurnDetector | None:
         """Build the detector on first audio, on a thread (Silero loads a model).
 
         A failure here disables VAD for the session and falls back to manual
-        `flush` rather than killing it — an operator who set SST_VAD=silero
+        `flush` rather than killing it — an operator who set STT_VAD=silero
         without installing it should lose auto-flush, not the endpoint.
         """
         nonlocal detector

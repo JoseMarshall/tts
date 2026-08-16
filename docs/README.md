@@ -18,7 +18,7 @@ server as it is; everything below describes intent.
 | Proposal | Status | Contents |
 |---|---|---|
 | [proposals/timing-marks.md](proposals/timing-marks.md) | implemented | Emit word/phoneme timings alongside streamed audio, for clients that animate in sync (lip-sync, captions) |
-| [proposals/vad-auto-flush.md](proposals/vad-auto-flush.md) | implemented | Server-side speech detection on `/v1/sst_ws`, so a turn ends when the speaker stops instead of when the client says so (hands-free turn-taking, barge-in) |
+| [proposals/vad-auto-flush.md](proposals/vad-auto-flush.md) | implemented | Server-side speech detection on `/v1/stt_ws`, so a turn ends when the speaker stops instead of when the client says so (hands-free turn-taking, barge-in) |
 | [proposals/concurrent-generation.md](proposals/concurrent-generation.md) | implemented | Run N instances of one model behind a pool instead of `Semaphore(1)`, to fill a GPU that a single small model leaves idle |
 
 ## Quick map of the codebase
@@ -50,6 +50,6 @@ app/
   samples ≈ 50 ms at 24 kHz), sent as 16-bit little-endian PCM.
 - **VAD** — a per-frame speech detector (`silero`, `energy`, `webrtc`). It only
   answers "is this frame speech?".
-- **Turn** — one utterance on `/v1/sst_ws`, from speech onset to the trailing
+- **Turn** — one utterance on `/v1/stt_ws`, from speech onset to the trailing
   silence that ends it. `TurnDetector` is the hysteresis that turns flickering
   VAD output into turn boundaries; everything worth tuning lives there.

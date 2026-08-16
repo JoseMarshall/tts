@@ -5,7 +5,7 @@ Two endpoints, in opposite directions:
 | Endpoint | Direction | Section |
 |---|---|---|
 | `ws://<host>:<port>/v1/tts/ws` | text in → audio out | below |
-| `ws://<host>:<port>/v1/sst_ws` | audio in → text out | [Speech-to-text](#speech-to-text-v1sst_ws) |
+| `ws://<host>:<port>/v1/stt_ws` | audio in → text out | [Speech-to-text](#speech-to-text-v1stt_ws) |
 
 ## Text-to-speech — `/v1/tts/ws`
 
@@ -168,9 +168,9 @@ asyncio.run(main())
 
 ---
 
-# Speech-to-text — `/v1/sst_ws`
+# Speech-to-text — `/v1/stt_ws`
 
-Endpoint: `ws://<host>:<port>/v1/sst_ws`
+Endpoint: `ws://<host>:<port>/v1/stt_ws`
 
 The mirror image of `/v1/tts/ws`: the **client** sends audio and the **server**
 sends text. Audio goes up as binary frames (or base64 inside a `chunk` message);
@@ -178,7 +178,7 @@ transcripts come back as JSON. The same forward-compatibility rule applies —
 ignore `type` values you do not recognise.
 
 Input audio is **16-bit little-endian mono PCM** at the `sample_rate` given in
-the `ready` frame (`SST_SAMPLE_RATE`, 16000 by default).
+the `ready` frame (`STT_SAMPLE_RATE`, 16000 by default).
 
 ## Client → server
 
@@ -236,7 +236,7 @@ auto-flush is a new *trigger* for the existing pipeline, not a second one.
   confirmed, so the first phoneme is not clipped. Without it every transcript
   would start "…ello" instead of "Hello".
 
-Per-session overrides on `init.vad` (each defaults to its `SST_VAD_*` setting):
+Per-session overrides on `init.vad` (each defaults to its `STT_VAD_*` setting):
 `enabled`, `backend`, `threshold`, `speech_ms`, `silence_ms`, `pre_roll_ms`,
 `max_utterance_s`. The `ready` frame reports the effective values plus
 `available`, so a client can discover support without probing.
@@ -247,9 +247,9 @@ Timing marks default to *on* because they add an ignorable frame type. This is
 different: auto-flush changes *when* transcription happens, which is session
 semantics, and a client written against manual flushing would start receiving
 `done` frames it never asked for. So it is opt-in per session — or set
-`SST_VAD_AUTO_FLUSH=1` for a deployment where every client wants it.
+`STT_VAD_AUTO_FLUSH=1` for a deployment where every client wants it.
 
-If the configured detector cannot be loaded (e.g. `SST_VAD=silero` without
+If the configured detector cannot be loaded (e.g. `STT_VAD=silero` without
 `pip install silero-vad`), the session gets one `error` frame and falls back to
 manual `flush`. It does not lose the socket.
 

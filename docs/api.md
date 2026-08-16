@@ -165,9 +165,9 @@ lists (accepts anything). An unknown `model` returns `400`.
 
 The server also transcribes. These take audio and return text; the WebSocket
 equivalent (with turn detection) is
-[`websocket.md`](websocket.md#speech-to-text-v1sst_ws).
+[`websocket.md`](websocket.md#speech-to-text-v1stt_ws).
 
-### `POST /v1/sst` — native transcription
+### `POST /v1/stt` — native transcription
 
 ```jsonc
 {"audio":"<base64 PCM/WAV/FLAC/MP3>",   // required
@@ -182,7 +182,7 @@ equivalent (with turn detection) is
 
 With `"response_format":"segments"` the response also carries a `segments` array.
 
-### `POST /v1/sst/stream` — streaming transcription
+### `POST /v1/stt/stream` — streaming transcription
 
 Same body. Responds `application/x-ndjson`, one JSON object per line:
 
@@ -203,13 +203,13 @@ curl -s http://localhost:8000/v1/audio/transcriptions \
   -F file=@speech.wav -F model=whisper -F response_format=json
 ```
 
-### SST discovery
+### STT discovery
 
-`GET /v1/sst/models` and `GET /v1/sst/voices[?model=…]` mirror their TTS
-counterparts, listing selectable SST models and the active backend's languages
+`GET /v1/stt/models` and `GET /v1/stt/voices[?model=…]` mirror their TTS
+counterparts, listing selectable STT models and the active backend's languages
 and accepted formats.
 
-### SST status codes
+### STT status codes
 
 `model` is checked against the operator's allow-list exactly as on the TTS side,
 so an unlisted model is a `400` rather than a silent fallback.
@@ -218,7 +218,7 @@ so an unlisted model is a `400` rather than a silent fallback.
 |---|---|
 | `400` | Unknown/-disallowed `model`; or `audio` present but empty or not valid base64; or a multipart request with no `file`. |
 | `422` | The `audio` field is missing entirely — a schema violation rather than bad content. |
-| `503` | Transcription queue full (`SST_MAX_QUEUE`). |
+| `503` | Transcription queue full (`STT_MAX_QUEUE`). |
 
 ## Audio formats
 

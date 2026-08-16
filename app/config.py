@@ -86,20 +86,20 @@ class Settings(BaseSettings):
 
 
 # --------------------------------------------------------------------------- #
-# SST (Speech-to-text) configuration — uses ``SST_`` prefix                  #
+# STT (Speech-to-text) configuration — uses ``STT_`` prefix                  #
 # --------------------------------------------------------------------------- #
-class _SSTSettings(BaseSettings):
-    """Reads environment variables with the ``SST_`` prefix."""
+class _STTSettings(BaseSettings):
+    """Reads environment variables with the ``STT_`` prefix."""
 
     model_config = SettingsConfigDict(
-        env_prefix="SST_",
+        env_prefix="STT_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
 
     # ---- Backend / catalog -------------------------------------------------
-    backend: str = "mock"       # default SST engine (when request omits one)
+    backend: str = "mock"       # default STT engine (when request omits one)
     backends: str = ""          # comma-sep extra backends a client may select
     model_id: str = ""          # specific model id within the default backend
     models: str = ""            # additional selectable ``backend:model_id`` entries
@@ -112,7 +112,7 @@ class _SSTSettings(BaseSettings):
     stream_chunk_samples: int = 1600           # ~100 ms at 16 kHz per chunk
     max_input_seconds: float = 30.0            # reject longer segments to guard GPU
 
-    # ---- Voice activity detection (/v1/sst_ws) -----------------------------
+    # ---- Voice activity detection (/v1/stt_ws) -----------------------------
     # Which detector to build when a session enables VAD. Nothing is imported
     # until then, so the server still starts with none of these installed.
     #   silero  — accurate, CPU, needs `pip install silero-vad`
@@ -121,7 +121,7 @@ class _SSTSettings(BaseSettings):
     vad: str = "silero"
     # Auto-flush changes session semantics (transcription fires on silence
     # instead of on an explicit `flush`), so it is opt-in per session by
-    # default. Set SST_VAD_AUTO_FLUSH=1 to make it the default for a
+    # default. Set STT_VAD_AUTO_FLUSH=1 to make it the default for a
     # deployment where every client wants it.
     vad_auto_flush: bool = False
     vad_threshold: float = 0.5                 # speech_prob at/above this = speech
@@ -155,5 +155,5 @@ def get_settings() -> Settings:
 
 
 @lru_cache
-def get_sst_settings() -> _SSTSettings:
-    return _SSTSettings()
+def get_stt_settings() -> _STTSettings:
+    return _STTSettings()

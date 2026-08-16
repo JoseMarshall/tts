@@ -21,15 +21,15 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from .config import Settings, get_settings, _SSTSettings
+from .config import Settings, get_settings, _STTSettings
 from .engine import (
     SSEngine,
     available_backends,
     engine_class,
     engine_default_model,
-    sst_available_backends,
-    sst_engine_class,
-    sst_engine_default_model,
+    stt_available_backends,
+    stt_engine_class,
+    stt_engine_default_model,
 )
 from .streaming import Transcriber  # forward-ref to avoid circular issues; imported at runtime via module-level access
 from .streaming import EnginePool, Synthesizer
@@ -200,25 +200,25 @@ class EngineManager:
 
 
 # --------------------------------------------------------------------------- #
-# SST (Speech-to-text) multi-model manager                                    #
+# STT (Speech-to-text) multi-model manager                                    #
 # --------------------------------------------------------------------------- #
-"""Parallel to ``EngineManager`` but for the SST side of the server.
+"""Parallel to ``EngineManager`` but for the STT side of the server.
 
 The server hosts BOTH text-to-speech and speech-to-text: a single process serves
-TTS ``/v1/tts`` endpoints and SST ``/v1/sst`` endpoints at the same time, each
+TTS ``/v1/tts`` endpoints and STT ``/v1/stt`` endpoints at the same time, each
 with its own engine catalog, lazy-loader and streaming bridge.
 
 Client selection mirrors TTS exactly:
-* default model  →  ``SST_BACKEND`` + ``SST_MODEL_ID``
-* extra backends →  ``SST_BACKENDS`` (selectable by backend name)
-* specific models →  ``SST_MODELS`` (``backend:model_id`` entries)
+* default model  →  ``STT_BACKEND`` + ``STT_MODEL_ID``
+* extra backends →  ``STT_BACKENDS`` (selectable by backend name)
+* specific models →  ``STT_MODELS`` (``backend:model_id`` entries)
 """
 
 _DEFAULT_ALIASES = {"", "default", "auto"}
 
 
-class SSTUnknownModelError(UnknownModelError):
-    """Raised when a requested SST model/backend is not selectable.
+class STTUnknownModelError(UnknownModelError):
+    """Raised when a requested STT model/backend is not selectable.
 
     Subclasses :class:`UnknownModelError` rather than sitting beside it: the
     route handlers all catch the latter to return 400, and a sibling class
@@ -228,7 +228,7 @@ class SSTUnknownModelError(UnknownModelError):
 
 
 @dataclass(frozen=True)
-class SSTModelSpec:
+class STTModelSpec:
     backend: str
     model_id: str
 
@@ -237,46 +237,46 @@ class SSTModelSpec:
         return f"{self.backend}:{self.model_id}"
 
 
-def _parse_sst_entry(entry: str, default_backend: str) -> SSTModelSpec:
-    """Parse an SST_MODELS entry: ``'backend:model_id'``, ``'backend'``, or ``'model_id'``."""
-    backends = sst_available_backends()
+def _parse_stt_entry(entry: str, default_backend: str) -> STTModelSpec:
+    """Parse an STT_MODELS entry: ``'backend:model_id'``, ``'backend'``, or ``'model_id'``."""
+    backends = stt_available_backends()
     if ":" in entry:
         head, tail = entry.split(":", 1)
         if head in backends:
-            return SSTModelSpec(head, tail or sst_engine_default_model(head))
+            return STTModelSpec(head, tail or stt_engine_default_model(head))
     if entry in backends:
-        return SSTModelSpec(entry, sst_engine_default_model(entry))
-    return SSTModelSpec(default_backend, entry)
+        return STTModelSpec(entry, stt_engine_default_model(entry))
+    return STTModelSpec(default_backend, entry)
 
 
-class SSTManager:
-    """Manages multiple SST backend models with lazy loading."""
+class STTManager:
+    """Manages multiple STT backend models with lazy loading."""
 
-    def __init__(self, sst_settings: _SSTSettings):
-        self._settings = sst_settings
+    def __init__(self, stt_settings: _STTSettings):
+        self._settings = stt_settings
         self._transcribers: dict[str, "Transcriber"] = {}  # spec.key -> Transcriber
         self._build_lock = asyncio.Lock()
 
         # Default model.
-        default_backend = sst_settings.backend or "mock"
-        default_model_id = sst_settings.model_id or sst_engine_default_model(default_backend)
-        self.default_spec = SSTModelSpec(default_backend, default_model_id)
+        default_backend = stt_settings.backend or "mock"
+        default_model_id = stt_settings.model_id or stt_engine_default_model(default_backend)
+        self.default_spec = STTModelSpec(default_backend, default_model_id)
 
         # Catalog of explicitly selectable model ids -> spec.
-        self._catalog: dict[str, SSTModelSpec] = {
+        self._catalog: dict[str, STTModelSpec] = {
             self.default_spec.model_id: self.default_spec
         }
         self._enabled_backends: set[str] = {default_backend}
 
-        for name in sst_settings.extra_backends:
-            sst_engine_class(name)  # validate
+        for name in stt_settings.extra_backends:
+            stt_engine_class(name)  # validate
             self._enabled_backends.add(name)
-            spec = SSTModelSpec(name, sst_engine_default_model(name))
+            spec = STTModelSpec(name, stt_engine_default_model(name))
             self._catalog.setdefault(spec.model_id, spec)
 
-        for entry in sst_settings.model_entries:
-            spec = _parse_sst_entry(entry, default_backend)
-            sst_engine_class(spec.backend)  # validate
+        for entry in stt_settings.model_entries:
+            spec = _parse_stt_entry(entry, default_backend)
+            stt_engine_class(spec.backend)  # validate
             self._enabled_backends.add(spec.backend)
             self._catalog[spec.model_id] = spec
 
@@ -290,8 +290,8 @@ class SSTManager:
         return sorted(self._enabled_backends)
 
     @property
-    def catalog(self) -> list[SSTModelSpec]:
-        seen: dict[str, SSTModelSpec] = {}
+    def catalog(self) -> list[STTModelSpec]:
+        seen: dict[str, STTModelSpec] = {}
         for spec in self._catalog.values():
             seen.setdefault(spec.key, spec)
         return list(seen.values())
@@ -302,19 +302,19 @@ class SSTManager:
         return sorted(set(ids) | set(self._enabled_backends))
 
     # ---- resolution ------------------------------------------------------- #
-    def resolve(self, model: str | None) -> SSTModelSpec:
+    def resolve(self, model: str | None) -> STTModelSpec:
         if model is None or model.strip().lower() in _DEFAULT_ALIASES:
             return self.default_spec
         m = model.strip().lower()
 
-        if m in self._enabled_backends and m in set(sst_available_backends()):
-            return SSTModelSpec(m, sst_engine_default_model(m))
+        if m in self._enabled_backends and m in set(stt_available_backends()):
+            return STTModelSpec(m, stt_engine_default_model(m))
 
         full = model.strip()  # preserve casing for model-id lookup
         if ":" in full:
             head, tail = full.split(":", 1)
             if head.lower() in self._enabled_backends:
-                spec = SSTModelSpec(head, tail)
+                spec = STTModelSpec(head, tail)
                 if spec.model_id in self._catalog or head == "mock":
                     return spec
 
@@ -323,10 +323,10 @@ class SSTManager:
 
         # Deliberately NOT permissive under the mock backend, unlike
         # EngineManager. TTS uses that escape hatch to exercise model-override
-        # plumbing with arbitrary names; the SST side has no such caller, and
+        # plumbing with arbitrary names; the STT side has no such caller, and
         # accepting anything would make the documented 400 unreachable — which
         # is exactly what hid this path until now.
-        raise SSTUnknownModelError(model)
+        raise STTUnknownModelError(model)
 
     async def get(self, model: str | None = None) -> object:
         """Return a Transcriber for the requested model, building it lazily.
@@ -342,11 +342,11 @@ class SSTManager:
         async with self._build_lock:
             if spec.key not in self._transcribers:
                 loop = asyncio.get_running_loop()
-                engine_cls = sst_engine_class(spec.backend)
+                engine_cls = stt_engine_class(spec.backend)
                 engine = await loop.run_in_executor(
                     None, self._build_engine, engine_cls, spec.model_id)
                 self._transcribers[spec.key] = Transcriber(engine, self._settings)
-                log.info("SST model ready: %s", spec.key)
+                log.info("STT model ready: %s", spec.key)
         return self._transcribers[spec.key]
 
     def _build_engine(self, engine_cls: type["SSEngine"], model_id: str):

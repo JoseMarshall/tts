@@ -161,7 +161,7 @@ bytes back.
 
 ## Not in this proposal
 
-- **VAD auto-flush on `/v1/sst_ws`.** The handler buffers audio and transcribes only on
+- **VAD auto-flush on `/v1/stt_ws`.** The handler buffers audio and transcribes only on
   an explicit `flush`, so a client cannot do hands-free turn-taking or barge-in. This is
   the next most valuable server change after marks and deserves its own proposal — it
   alters session semantics rather than adding a frame type.
