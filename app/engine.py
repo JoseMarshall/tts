@@ -558,45 +558,45 @@ def build_engine(settings: Settings, model_id: str | None = None) -> TTSEngine:
 
 
 # --------------------------------------------------------------------------- #
-# SST (Speech-to-text) engines — parallel hierarchy                           #
+# STT (Speech-to-text) engines — parallel hierarchy                           #
 # --------------------------------------------------------------------------- #
 
-_SST_REGISTRY: dict[str, type["SSEngine"]] = {}
+_STT_REGISTRY: dict[str, type["SSEngine"]] = {}
 
 
-def _sst_register(cls: type["SSEngine"]) -> type["SSEngine"]:
-    """Class decorator: register an SST engine under its ``NAME``."""
+def _stt_register(cls: type["SSEngine"]) -> type["SSEngine"]:
+    """Class decorator: register an STT engine under its ``NAME``."""
     if not getattr(cls, "NAME", None):
         raise ValueError(f"{cls.__name__} must define a NAME")
-    _SST_REGISTRY[cls.NAME] = cls
+    _STT_REGISTRY[cls.NAME] = cls
     return cls
 
 
-def sst_available_backends() -> list[str]:
-    return sorted(_SST_REGISTRY)
+def stt_available_backends() -> list[str]:
+    return sorted(_STT_REGISTRY)
 
 
-def sst_engine_class(name: str) -> type["SSEngine"]:
+def stt_engine_class(name: str) -> type["SSEngine"]:
     try:
-        return _SST_REGISTRY[name]
+        return _STT_REGISTRY[name]
     except KeyError:
         raise ValueError(
-            f"Unknown SST backend {name!r}. Available: {sst_available_backends()}"
+            f"Unknown STT backend {name!r}. Available: {stt_available_backends()}"
         )
 
 
-def sst_engine_default_model(name: str) -> str:
-    return sst_engine_class(name).DEFAULT_MODEL or name
+def stt_engine_default_model(name: str) -> str:
+    return stt_engine_class(name).DEFAULT_MODEL or name
 
 
 class SSEngine(abc.ABC):
     """Abstract base for all speech-to-text engines.
 
-    An SST engine takes audio bytes and produces text.  Streaming engines can
+    An STT engine takes audio bytes and produces text.  Streaming engines can
     yield partial segments while a non-streaming one waits for the complete
     result before returning.
 
-    Adding a new SST backend mirrors the TTS pattern — register, define metadata,
+    Adding a new STT backend mirrors the TTS pattern — register, define metadata,
     implement ``__init__`` (heavy imports here) and ``stream_transcribe()``. No
     changes are needed in routing, framing or the manager.
 
@@ -620,7 +620,7 @@ class SSEngine(abc.ABC):
     def __init__(self, settings: "Settings", model_id: str | None = None):
         self.settings = settings
         self.model_id = model_id or (
-            getattr(settings, "sst_model_id", "") or sst_engine_default_model(self.NAME)
+            getattr(settings, "stt_model_id", "") or stt_engine_default_model(self.NAME)
         )
 
     @abc.abstractmethod
@@ -639,12 +639,31 @@ class SSEngine(abc.ABC):
     def warmup(self) -> None:          # optional; best-effort
         pass
 
+    # ---- input decoding (shared by every STT backend) --------------------- #
+    @property
+    def target_sample_rate(self) -> int:
+        return self.SAMPLE_RATE or getattr(self.settings, "sample_rate", 16000)
+
+    @property
+    def max_input_samples(self) -> int:
+        seconds = float(
+            getattr(self.settings, "max_input_seconds", 0) or self.MAX_INPUT_SECONDS
+        )
+        return int(self.target_sample_rate * seconds)
+
+    def decode(self, audio_bytes: bytes) -> np.ndarray:
+        """Request bytes -> float32 mono samples at ``target_sample_rate``,
+        truncated to ``max_input_seconds``."""
+        return decode_audio(audio_bytes, self.target_sample_rate)[
+            : self.max_input_samples
+        ]
+
     def _language(self, req_language: str | None) -> str | None:
         """Resolve a language hint, falling through settings → backend default."""
-        # Accept either the TTS-style or SST-style field name for compatibility.
+        # Accept either the TTS-style or STT-style field name for compatibility.
         return (req_language
                 or getattr(self.settings, "default_language", None)
-                or getattr(self.settings, "sst_default_language", None))
+                or getattr(self.settings, "stt_default_language", None))
 
     @classmethod
     def capabilities(cls) -> dict:
@@ -658,9 +677,82 @@ class SSEngine(abc.ABC):
 
 
 # --------------------------------------------------------------------------- #
-# Mock SST backend                                                            #
+# STT input decoding                                                          #
 # --------------------------------------------------------------------------- #
-@_sst_register
+def decode_audio(audio_bytes: bytes, target_sr: int) -> np.ndarray:
+    """Decode request audio to float32 mono at ``target_sr``.
+
+    The STT engines are fed from two callers carrying different bytes:
+    ``/v1/stt`` and ``/v1/audio/transcriptions`` forward a whole uploaded
+    **file** (wav/mp3/flac/…), while ``/v1/stt_ws`` streams **raw
+    little-endian int16 PCM** frames. Both arrive as bare ``bytes`` with
+    nothing to tell them apart, so try a container first and fall back to raw
+    PCM16 — a headerless buffer is exactly what soundfile rejects.
+
+    Never hand these bytes straight to a transformers pipeline: it treats
+    ``bytes`` as an encoded file and shells out to ffmpeg, which fails on raw
+    PCM with "Soundfile is either not in the correct format or is malformed".
+    """
+    if not audio_bytes:
+        return np.zeros(0, dtype=np.float32)
+
+    samples, sr = _decode_container(audio_bytes)
+    if samples is None:
+        # Raw PCM16 at whatever rate the WS session negotiated (== target_sr).
+        # Drop a trailing odd byte: frombuffer rejects a buffer that isn't a
+        # whole number of samples, and a split frame shouldn't be a 500.
+        pcm = audio_bytes[: len(audio_bytes) - (len(audio_bytes) % 2)]
+        samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+        sr = target_sr
+
+    samples = _as_float_mono(samples)
+    if sr and sr != target_sr and samples.size:
+        samples = _resample(samples, sr, target_sr)
+    return samples
+
+
+def _silence_pcm16(samples: int) -> bytes:
+    """``samples`` of silence in the raw PCM16 wire format engines expect."""
+    return b"\x00\x00" * samples
+
+
+def _decode_container(audio_bytes: bytes) -> tuple[np.ndarray | None, int]:
+    """Parse a self-describing audio file. ``(None, 0)`` if it isn't one."""
+    import io
+
+    try:
+        import soundfile as sf  # optional dep, kept local
+    except ImportError:
+        return None, 0
+    try:
+        samples, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
+    except Exception:
+        return None, 0
+    return samples, int(sr)
+
+
+def _resample(samples: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
+    try:
+        import librosa  # optional dep, kept local
+    except ImportError:
+        # Linear interpolation is poorer than librosa's polyphase filter, but a
+        # missing optional dep shouldn't turn a decodable request into a 500.
+        n = int(round(samples.size * target_sr / orig_sr))
+        if n <= 0:
+            return np.zeros(0, dtype=np.float32)
+        src = np.arange(samples.size, dtype=np.float32)
+        return np.interp(
+            np.linspace(0, samples.size - 1, n), src, samples
+        ).astype(np.float32)
+    return librosa.resample(
+        samples, orig_sr=orig_sr, target_sr=target_sr
+    ).astype(np.float32)
+
+
+# --------------------------------------------------------------------------- #
+# Mock STT backend                                                            #
+# --------------------------------------------------------------------------- #
+@_stt_register
 class MockSSEngine(SSEngine):
     """Generates a short synthetic transcript. No deps, no GPU needed."""
 
@@ -690,7 +782,7 @@ class MockSSEngine(SSEngine):
 # --------------------------------------------------------------------------- #
 # VoxtralEngine — mistralai/Voxtral-Small-24B-2507 via transformers           #
 # --------------------------------------------------------------------------- #
-@_sst_register
+@_stt_register
 class VoxtralEngine(SSEngine):
     """Voxtral-Small (8x7B) multimodal speech-to-text via the ``transformers``
     pipeline.
@@ -719,7 +811,9 @@ class VoxtralEngine(SSEngine):
 
     def warmup(self) -> None:
         try:
-            list(self.stream_transcribe(b"\x00" * self.SAMPLE_RATE))
+            # One second of silence as SAMPLES. Passing bytes here would make
+            # transformers read them as an encoded file and invoke ffmpeg.
+            list(self.stream_transcribe(_silence_pcm16(self.SAMPLE_RATE)))
             log.info("Warmup complete.")
         except Exception:  # pragma: no cover
             log.exception("Warmup failed (continuing anyway).")
@@ -727,10 +821,13 @@ class VoxtralEngine(SSEngine):
     def stream_transcribe(
         self, audio_bytes: bytes, *, language: str | None = None,
     ) -> Iterator[str]:
+        samples = self.decode(audio_bytes)
+        if not samples.size:
+            return
         # pipeline returns {"text": "..."} for a single chunk; we split into segments.
         result = self._pipeline(
-            np.frombuffer(audio_bytes, dtype=np.float32)[:self.SAMPLE_RATE * self.MAX_INPUT_SECONDS],
-            generate_kwargs={"language": language} if language else None,
+            {"raw": samples, "sampling_rate": self.target_sample_rate},
+            generate_kwargs={"language": language} if language else {},
         )
         text = result.get("text", "")
         if text:
@@ -740,7 +837,7 @@ class VoxtralEngine(SSEngine):
 # --------------------------------------------------------------------------- #
 # WhisperEngine — whisper-large-v3 (or any model) via native whisper or pipeline
 # --------------------------------------------------------------------------- #
-@_sst_register
+@_stt_register
 class WhisperEngine(SSEngine):
     """OpenAI Whisper via the ``transformers`` automatic-speech-recognition
     pipeline.  Supports any whisper model on HuggingFace.
@@ -757,11 +854,30 @@ class WhisperEngine(SSEngine):
 
     def __init__(self, settings: Settings, model_id: str | None = None):
         super().__init__(settings, model_id)
+        self._pipeline = None
+        self._native = None
         try:
             import whisper as _whisper  # noqa: F401 -- check availability
             self._use_native = True
         except ImportError:
             self._use_native = False
+
+    def _ensure_native(self):
+        """Load (once) the native whisper model.
+
+        Native whisper takes a size name ("large-v3"), not a HuggingFace repo
+        id, so strip an ``openai/whisper-`` prefix if the configured
+        ``STT_MODEL_ID`` is the HF form.
+        """
+        if self._native is None:
+            name = (self.model_id or self.DEFAULT_MODEL).rsplit("/", 1)[-1]
+            name = name.removeprefix("whisper-")
+            log.info("Loading native whisper model %r on %s ...",
+                     name, self.settings.device)
+            self._native = __import__("whisper").load_model(
+                name, device=self.settings.device,
+            )
+        return self._native
 
     def _ensure_pipeline(self):
         if getattr(self, "_pipeline", None) is not None:
@@ -778,37 +894,32 @@ class WhisperEngine(SSEngine):
         )
 
     def warmup(self) -> None:
-        if self._use_native:
-            whisper_model = __import__("whisper").load_model(
-                self.model_id or self.DEFAULT_MODEL,
-                device=self.settings.device,
-            )
-            whisper_model.transcribe(b"\x00" * 16000)
-        else:
-            self._ensure_pipeline()
-            self._pipeline(b"\x00" * 16000)
-        log.info("Warmup complete.")
+        # Best-effort, like every other engine's warmup: this runs inside the
+        # lifespan handler, so raising here takes the whole server down at
+        # startup rather than failing the one request that needs the model.
+        try:
+            # One second of silence as SAMPLES. Handing raw bytes to the
+            # transformers pipeline makes it read them as an encoded file and
+            # shell out to ffmpeg, which is what failed here before.
+            list(self.stream_transcribe(_silence_pcm16(self.SAMPLE_RATE)))
+            log.info("Warmup complete.")
+        except Exception:  # pragma: no cover
+            log.exception("Warmup failed (continuing anyway).")
 
     def stream_transcribe(
         self, audio_bytes: bytes, *, language: str | None = None,
     ) -> Iterator[str]:
         lang = language or "auto"
+        # Both paths want mono float32 at 16 kHz, whether the caller sent a
+        # file (HTTP) or raw PCM16 frames (WebSocket).
+        samples = self.decode(audio_bytes)
+        if not samples.size:
+            return
 
         # ---- native whisper path (faster, less VRAM) ------------------------ #
         if self._use_native:
-            import soundfile as sf  # for loading audio
-            model = __import__("whisper").load_model(
-                self.model_id or self.DEFAULT_MODEL,
-                device=self.settings.device,
-            )
-            # whisper expects mono float32 PCM at 16kHz
-            try:
-                samples, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32", samplerate=16000)
-            except Exception:
-                samples = np.frombuffer(audio_bytes, dtype=np.float32)[:16000 * self.MAX_INPUT_SECONDS]
-            result = model.transcribe(
-                samples if sr == 16000 else librosa.resample(samples, orig_sr=sr, target_sr=16000),
-                language=lang if lang != "auto" else None,
+            result = self._ensure_native().transcribe(
+                samples, language=None if lang == "auto" else lang,
             )
             for seg in result.get("segments", []):
                 yield seg["text"]
@@ -816,9 +927,11 @@ class WhisperEngine(SSEngine):
         # ---- transformers pipeline fallback -------------------------------- #
         else:
             self._ensure_pipeline()
-            samples = np.frombuffer(audio_bytes, dtype=np.float32)[:self.SAMPLE_RATE * self.MAX_INPUT_SECONDS]
-            gen_kwargs = {"language": lang} if lang != "auto" else None
-            result = self._pipeline(samples, generate_kwargs=gen_kwargs or {})
+            gen_kwargs = {} if lang == "auto" else {"language": lang}
+            result = self._pipeline(
+                {"raw": samples, "sampling_rate": self.target_sample_rate},
+                generate_kwargs=gen_kwargs,
+            )
             text = result.get("text", "")
             if text:
                 yield text
