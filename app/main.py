@@ -2,23 +2,25 @@
 from __future__ import annotations
 
 import asyncio
+import base64 as _b64
 import json
 import logging
 import threading
 from contextlib import asynccontextmanager
 
 from fastapi import (
-    Body,
     Depends,
     FastAPI,
     Header,
     HTTPException,
     Request,
-    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.responses import Response, StreamingResponse
+# The base class starlette's form parser actually produces; fastapi.UploadFile
+# subclasses it, so this catches both.
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .audio import CONTENT_TYPES, pcm_to_wav, wav_header
 from .config import Settings, get_settings, get_sst_settings
@@ -282,75 +284,88 @@ async def sst_voices(
 # --------------------------------------------------------------------------- #
 
 
-@app.post("/v1/sst", dependencies=[Depends(require_auth)])
-async def sst(
-    body: dict = Body(...),
-    manager: SSTManager = Depends(get_sst_manager),
-):
-    """Native speech-to-text endpoint.  Accepts ``audio`` (base64-encoded) + ``model``."""
-    raw_audio_val = body.get("audio", "")
-    if isinstance(raw_audio_val, str):
-        import base64 as _b64
-        padding = "=" * (-len(raw_audio_val) % 4)
-        raw_audio = _b64.urlsafe_b64decode(raw_audio_val + padding)
-    else:
-        raw_audio = bytes(raw_audio_val) if raw_audio_val else b""
+def _form_str(form, key: str) -> str | None:
+    """A multipart field as a string, or None if absent/empty/a file upload."""
+    value = form.get(key)
+    return value if isinstance(value, str) and value else None
 
-    if not raw_audio:
-        raise HTTPException(status_code=400, detail="'audio' field is required (base64)")
 
-    sst_model = body.get("model")
-    lang = body.get("language")
+def _decode_b64_audio(value: str) -> bytes:
+    """Decode base64 audio, tolerating missing padding. Raises ``ValueError``.
 
+    Accepts both the standard (``+/``) and URL-safe (``-_``) alphabets, because
+    clients disagree about which they send. ``validate=True`` matters twice
+    over: the permissive default silently DISCARDS characters outside the
+    alphabet, so genuine garbage decoded to a few stray bytes instead of
+    failing, and a standard-base64 payload containing ``+`` or ``/`` decoded to
+    *corrupt audio* rather than being rejected or handled.
+    """
+    normalised = value.replace("-", "+").replace("_", "/")
+    padding = "=" * (-len(normalised) % 4)
+    return _b64.b64decode(normalised + padding, validate=True)
+
+
+def _decode_audio_field(value: str) -> bytes:
+    """HTTP wrapper: an undecodable ``audio`` body is a 400."""
     try:
-        synth = await manager.get(sst_model)
+        return _decode_b64_audio(value)
+    except ValueError:      # binascii.Error is a ValueError subclass
+        raise HTTPException(
+            status_code=400, detail="'audio' is not valid base64",
+        )
+
+
+async def _resolve_transcriber(manager: SSTManager, model: str | None):
+    """Shared lookup + admission control for the native SST endpoints."""
+    try:
+        transcriber = await manager.get(model)
     except UnknownModelError as exc:
         raise HTTPException(
             status_code=400,
             detail=f"Unknown model {exc.args[0]!r}. Available: {manager.available}",
         )
-
-    # Admission control.
-    if synth.at_capacity:  # type: ignore[attr-defined]
+    if transcriber.at_capacity:  # type: ignore[attr-defined]
         raise HTTPException(status_code=503, detail="server busy: queue is full")
+    return transcriber
 
+
+@app.post("/v1/sst", dependencies=[Depends(require_auth)])
+async def sst(
+    req: SSTRequest,
+    manager: SSTManager = Depends(get_sst_manager),
+):
+    """Native speech-to-text endpoint. Accepts ``audio`` (base64) + ``model``.
+
+    Validation comes from :class:`SSTRequest`, so a body missing ``audio``
+    is a 422 (the schema was violated) rather than a hand-rolled 400. A
+    *present but empty* or undecodable ``audio`` is still a 400 — the shape is
+    right, the content is not.
+    """
+    raw_audio = _decode_audio_field(req.audio)
+    if not raw_audio:
+        raise HTTPException(status_code=400, detail="'audio' field is required (base64)")
+
+    synth = await _resolve_transcriber(manager, req.model)
+    synth.set_language(req.language)  # type: ignore[attr-defined]
     text = await synth.transcribe(raw_audio)  # type: ignore[attr-defined]
-    fmt = body.get("response_format", "text")
 
-    if fmt == "segments":
-        return {"text": text, "segments": [s for s in text.split()]}
+    if req.response_format == "segments":
+        return {"text": text, "segments": text.split()}
     return {"text": text}
 
 
 @app.post("/v1/sst/stream", dependencies=[Depends(require_auth)])
 async def sst_stream(
-    body: dict = Body(...),
+    req: SSTRequest,
     manager: SSTManager = Depends(get_sst_manager),
 ):
     """Streaming transcription.  Yields text segments as JSON frames."""
-    raw_audio_val = body.get("audio", "")
-    if isinstance(raw_audio_val, str):
-        import base64 as _b64
-        padding = "=" * (-len(raw_audio_val) % 4)
-        raw_audio = _b64.urlsafe_b64decode(raw_audio_val + padding)
-    else:
-        raw_audio = bytes(raw_audio_val) if raw_audio_val else b""
-
+    raw_audio = _decode_audio_field(req.audio)
     if not raw_audio:
         raise HTTPException(status_code=400, detail="'audio' field is required (base64)")
 
-    sst_model = body.get("model")
-
-    try:
-        synth = await manager.get(sst_model)
-    except UnknownModelError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown model {exc.args[0]!r}. Available: {manager.available}",
-        )
-
-    if synth.at_capacity:  # type: ignore[attr-defined]
-        raise HTTPException(status_code=503, detail="server busy: queue is full")
+    synth = await _resolve_transcriber(manager, req.model)
+    synth.set_language(req.language)  # type: ignore[attr-defined]
 
     async def segment_stream():
         yield json.dumps({"type": "start", "model": synth.model_id}).encode() + b"\n"  # type: ignore[attr-defined]
@@ -378,36 +393,27 @@ async def openai_sst(
     form = await request.form()
     audio_bytes = b""
     file_obj = form.get("file")
-    if isinstance(file_obj, UploadFile):
+    # Starlette's form parser yields ITS OWN UploadFile, and fastapi.UploadFile
+    # is a subclass of that — so testing against fastapi's silently missed every
+    # real upload and returned "'file' field is required". Check the base class.
+    if isinstance(file_obj, StarletteUploadFile):
         audio_bytes = await file_obj.read()
-    elif isinstance(file_obj, bytes) and file_obj:
-        audio_bytes = file_obj
+    elif isinstance(file_obj, (bytes, bytearray)) and file_obj:
+        audio_bytes = bytes(file_obj)
 
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="'file' field is required (audio)")
 
-    lang = form.get("language")
-    fmt = form.get("response_format", "text")
-    sst_model = None
-    for k in ("model",):
-        val = form.get(k)
-        if val:
-            sst_model = val
+    # form.get() returns str OR UploadFile; only strings mean anything here.
+    lang = _form_str(form, "language")
+    fmt = _form_str(form, "response_format") or "text"
+    sst_model = _form_str(form, "model")
 
-    try:
-        synth = await manager.get(sst_model)
-    except UnknownModelError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown model {exc.args[0]!r}. Available: {manager.available}",
-        )
-
-    if synth.at_capacity:  # type: ignore[attr-defined]
-        raise HTTPException(status_code=503, detail="server busy: queue is full")
-
+    synth = await _resolve_transcriber(manager, sst_model)
+    synth.set_language(lang)  # type: ignore[attr-defined]
     text = await synth.transcribe(audio_bytes)  # type: ignore[attr-defined]
 
-    if fmt == "json" or fmt == "verbose_json":
+    if fmt in ("json", "verbose_json"):
         return OpenAISSTResponse(text=text)
     return Response(content=text, media_type="text/plain")
 
@@ -599,8 +605,6 @@ async def tts_ws(ws: WebSocket):
 #   {"type":"done","count":N,"full_text":"..."}       transcription complete   #
 #   {"type":"error","message":"..."}                  error or validation      #
 # --------------------------------------------------------------------------- #
-
-import base64 as _b64  # local alias — avoids per-call import in the handler
 
 # Session-tunable VAD fields, and where each one's default comes from.
 _VAD_FIELDS = {
@@ -836,8 +840,15 @@ async def sst_ws_endpoint(ws: WebSocket):
             elif mtype == "chunk":
                 data = msg.get("data", b"")
                 if isinstance(data, str):
-                    padding = "=" * (-len(data) % 4)
-                    await _on_audio(_b64.urlsafe_b64decode(data + padding))
+                    try:
+                        pcm = _decode_b64_audio(data)
+                    except ValueError:
+                        await ws.send_json({
+                            "type": "error",
+                            "message": "'data' is not valid base64",
+                        })
+                        continue
+                    await _on_audio(pcm)
                 elif isinstance(data, (bytes, bytearray)):
                     await _on_audio(bytes(data))
 

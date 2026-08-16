@@ -217,8 +217,14 @@ Client selection mirrors TTS exactly:
 _DEFAULT_ALIASES = {"", "default", "auto"}
 
 
-class SSTUnknownModelError(KeyError):
-    """Raised when a requested SST model/backend is not selectable."""
+class SSTUnknownModelError(UnknownModelError):
+    """Raised when a requested SST model/backend is not selectable.
+
+    Subclasses :class:`UnknownModelError` rather than sitting beside it: the
+    route handlers all catch the latter to return 400, and a sibling class
+    would sail past them as a 500. "Unknown model" is one concept whichever
+    subsystem raises it.
+    """
 
 
 @dataclass(frozen=True)
@@ -315,9 +321,11 @@ class SSTManager:
         if full in self._catalog:
             return self._catalog[full]
 
-        if self._settings.backend == "mock":
-            return SSTModelSpec("mock", full)
-
+        # Deliberately NOT permissive under the mock backend, unlike
+        # EngineManager. TTS uses that escape hatch to exercise model-override
+        # plumbing with arbitrary names; the SST side has no such caller, and
+        # accepting anything would make the documented 400 unreachable — which
+        # is exactly what hid this path until now.
         raise SSTUnknownModelError(model)
 
     async def get(self, model: str | None = None) -> object:

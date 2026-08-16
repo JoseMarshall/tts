@@ -664,6 +664,141 @@ def test_sst_stream_no_start_end(client):
     assert lines  # must have at least one frame
 
 
+# ---- SST regressions ------------------------------------------------------- #
+def test_sst_unknown_model_error_is_a_400_not_a_500():
+    """SSTUnknownModelError must be catchable as UnknownModelError.
+
+    The route handlers all `except UnknownModelError` to return 400. While
+    these were siblings, an SST miss sailed past them into a 500 — hidden only
+    because the mock backend used to accept every model name.
+    """
+    from app.manager import SSTUnknownModelError, UnknownModelError
+    assert issubclass(SSTUnknownModelError, UnknownModelError)
+
+
+def test_sst_manager_rejects_unknown_models_under_mock():
+    from app.config import _SSTSettings
+    from app.manager import SSTManager, SSTUnknownModelError
+    mgr = SSTManager(_SSTSettings(backend="mock", backends="", model_id="", models=""))
+    assert mgr.resolve("mock").backend == "mock"
+    assert mgr.resolve(None) == mgr.default_spec
+    with pytest.raises(SSTUnknownModelError):
+        mgr.resolve("nonexistent")
+
+
+def test_sst_stream_unknown_model(client):
+    # Same rejection on the streaming endpoint: the 400 happens before the
+    # StreamingResponse starts, so it can still be a status code.
+    r = client.post("/v1/sst/stream",
+                    json={"audio": "dGVzdA==", "model": "nonexistent"})
+    assert r.status_code == 400
+
+
+def test_sst_voices_unknown_model(client):
+    r = client.get("/v1/sst/voices", params={"model": "nonexistent"})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("bad", ["!!!not base64!!!", "!!!nope!!!", "@@@@"])
+def test_sst_invalid_base64(client, bad):
+    """Garbage must be rejected, not quietly salvaged.
+
+    `urlsafe_b64decode` without validate=True DISCARDS out-of-alphabet
+    characters, so "!!!nope!!!" decoded to three stray bytes and returned 200.
+    """
+    r = client.post("/v1/sst", json={"audio": bad})
+    assert r.status_code == 400
+    assert "base64" in r.json()["detail"].lower()
+
+
+def test_sst_accepts_both_base64_alphabets(client):
+    """Standard and URL-safe base64 of the same bytes must transcribe alike.
+
+    Bytes like b'\\xfb\\xff' encode with '+' and '/' in the standard alphabet.
+    Decoding those with urlsafe_b64decode used to silently drop them, i.e.
+    corrupt audio rather than an error.
+    """
+    raw = bytes(range(256)) * 8          # guaranteed to hit +/ and -_
+    standard = _b64.b64encode(raw).decode()
+    urlsafe = _b64.urlsafe_b64encode(raw).decode()
+    assert ("+" in standard or "/" in standard), "test data must exercise +/"
+
+    a = client.post("/v1/sst", json={"audio": standard})
+    b = client.post("/v1/sst", json={"audio": urlsafe})
+    assert a.status_code == 200 and b.status_code == 200
+    assert a.json()["text"] == b.json()["text"]
+
+
+def test_sst_ws_rejects_invalid_base64_chunk(client):
+    with client.websocket_connect("/v1/sst_ws") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "chunk", "data": "!!!nope!!!"})
+        err = ws.receive_json()
+        assert err["type"] == "error" and "base64" in err["message"]
+        ws.send_json({"type": "close"})
+
+
+def test_sst_stream_missing_audio_is_422(client):
+    # Same schema as /v1/sst, so the same distinction: absent field = 422.
+    assert client.post("/v1/sst/stream", json={"model": "mock"}).status_code == 422
+
+
+def test_openai_sst_returns_the_transcript(client):
+    """The multipart upload must actually reach the engine.
+
+    `isinstance(file_obj, fastapi.UploadFile)` was false for every real upload
+    (starlette's parser yields its own base class), so this endpoint answered
+    "'file' field is required" no matter what was sent.
+    """
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00" * 3200)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_buf.getvalue(), "audio/wav")},
+        data={"model": "mock"},
+    )
+    assert r.status_code == 200
+    assert r.text.strip(), "expected a transcript, not an empty body"
+
+
+def test_openai_sst_json_shape(client):
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00" * 3200)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_buf.getvalue(), "audio/wav")},
+        data={"model": "mock", "response_format": "json"},
+    )
+    assert r.status_code == 200
+    assert r.json()["text"].strip()
+
+
+def test_openai_sst_unknown_model(client):
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00" * 320)
+
+    r = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("audio.wav", wav_buf.getvalue(), "audio/wav")},
+        data={"model": "nonexistent"},
+    )
+    assert r.status_code == 400
+
+
 # ---- SST WebSocket tests --------------------------------------------------- #
 
 def test_sst_ws_connect_and_ready(client):

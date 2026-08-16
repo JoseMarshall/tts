@@ -161,6 +161,65 @@ lists (accepts anything). An unknown `model` returns `400`.
 
 ---
 
+## Speech-to-text endpoints
+
+The server also transcribes. These take audio and return text; the WebSocket
+equivalent (with turn detection) is
+[`websocket.md`](websocket.md#speech-to-text-v1sst_ws).
+
+### `POST /v1/sst` — native transcription
+
+```jsonc
+{"audio":"<base64 PCM/WAV/FLAC/MP3>",   // required
+ "model":"whisper",                      // optional; backend name or model id
+ "language":"en",                        // optional hint; omit to auto-detect
+ "response_format":"text"}               // "text" (default) or "segments"
+```
+
+```json
+{"text": "hello there"}
+```
+
+With `"response_format":"segments"` the response also carries a `segments` array.
+
+### `POST /v1/sst/stream` — streaming transcription
+
+Same body. Responds `application/x-ndjson`, one JSON object per line:
+
+```jsonc
+{"type":"start","model":"openai/whisper-large-v3"}
+{"type":"segment","text":"hello there"}
+{"type":"end"}
+```
+
+### `POST /v1/audio/transcriptions` — OpenAI-compatible
+
+`multipart/form-data` with a `file` field, plus optional `model`, `language`
+and `response_format`. Returns `text/plain` by default, or
+`{"text": "..."}` for `response_format` of `json` / `verbose_json`.
+
+```bash
+curl -s http://localhost:8000/v1/audio/transcriptions \
+  -F file=@speech.wav -F model=whisper -F response_format=json
+```
+
+### SST discovery
+
+`GET /v1/sst/models` and `GET /v1/sst/voices[?model=…]` mirror their TTS
+counterparts, listing selectable SST models and the active backend's languages
+and accepted formats.
+
+### SST status codes
+
+`model` is checked against the operator's allow-list exactly as on the TTS side,
+so an unlisted model is a `400` rather than a silent fallback.
+
+| Code | Meaning |
+|---|---|
+| `400` | Unknown/-disallowed `model`; or `audio` present but empty or not valid base64; or a multipart request with no `file`. |
+| `422` | The `audio` field is missing entirely — a schema violation rather than bad content. |
+| `503` | Transcription queue full (`SST_MAX_QUEUE`). |
+
 ## Audio formats
 
 | Format | Content-Type | Notes |
