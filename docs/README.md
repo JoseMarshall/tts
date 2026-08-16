@@ -10,6 +10,15 @@ Reference documentation for the Qwen3-TTS streaming server.
 | [configuration.md](configuration.md) | Every environment variable, model allow-listing, auth |
 | [deployment.md](deployment.md) | Running locally, the real GPU backend, Docker, scaling, troubleshooting |
 
+## Proposals
+
+Design notes for changes that are not built yet. Everything above this line documents the
+server as it is; everything below describes intent.
+
+| Proposal | Contents |
+|---|---|
+| [proposals/timing-marks.md](proposals/timing-marks.md) | Emit word/phoneme timings alongside streamed audio, for clients that animate in sync (lip-sync, captions) |
+
 ## Quick map of the codebase
 
 ```
