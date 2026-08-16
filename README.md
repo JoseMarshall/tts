@@ -50,7 +50,7 @@ Full API and protocol reference lives in [`docs/`](docs/).
 ## Quickstart (mock backend, no GPU)
 
 ```bash
-python -m venv .venv && . .venv/Scripts/activate   # Windows
+py -m venv .venv && .venv\Scripts\activate.bat  # Windows
 # python -m venv .venv && source .venv/bin/activate  # Linux/macOS
 pip install -r requirements.txt
 
