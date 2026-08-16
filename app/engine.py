@@ -32,7 +32,7 @@ Backends bundled here:
 * ``MockEngine``   — dependency-free tone generator (no GPU / no downloads).
 * ``QwenEngine``   — Qwen3-TTS via the ``qwen-tts`` package.
 * ``KokoroEngine`` — Kokoro-82M via the ``kokoro`` package.
-* ``DiaEngine``    — Dia-1.6B dialogue model via the ``dia`` package.
+* ``DiaEngine``    — Dia2 dialogue model via the ``dia2`` package.
 """
 from __future__ import annotations
 
@@ -460,31 +460,74 @@ class KokoroEngine(TTSEngine):
 
 
 # --------------------------------------------------------------------------- #
-# Dia-1.6B backend (nari-labs)
+# Dia2 backend (nari-labs)
 # --------------------------------------------------------------------------- #
 @register
 class DiaEngine(TTSEngine):
-    """Dia is a dialogue TTS model: speakers are marked inline with [S1]/[S2]
+    """Dia2 is a dialogue TTS model: speakers are marked inline with [S1]/[S2]
     tags (and non-verbals like ``(laughs)``), so there are no preset voices.
-    It supports voice cloning via an audio prompt, outputs 44.1 kHz, and is not
-    natively streaming — we generate the clip and re-chunk it into frames.
+
+    This targets **Dia2** (``nari-labs/Dia2-1B``) via the ``dia2`` package,
+    which is a different library from the ``dia`` package that served Dia 1 —
+    different entry point (``Dia2.from_repo``), different generation call, and
+    a codec change that moves the output rate from 44.1 kHz to Mimi's 24 kHz.
+    Points of note for this adapter:
+
+    * ``generate()`` returns the whole clip, so we re-chunk it into frames.
+      (Dia2 streams internally as text arrives; the Python API still hands
+      back one finished waveform.)
+    * The result carries **word timestamps**, so unlike Dia 1 this backend can
+      emit timing marks — hence ``SUPPORTS_MARKS`` and ``stream_marked``.
+    * Voice cloning is *prefix conditioning*: Dia2 takes reference audio as a
+      **file path** and transcribes it itself, so ``ref_text`` is unnecessary
+      (accepted and ignored) and non-path ``ref_audio`` is staged to a temp
+      file. Speaker 2's prefix rides on ``ref_audio2``-style usage via the
+      same field when two are supplied, comma-separated.
+    * English only, and generation is capped near two minutes by the model's
+      ``max_context_steps``.
     """
 
     NAME = "dia"
-    DEFAULT_MODEL = "nari-labs/Dia-1.6B"
-    SAMPLE_RATE = 44100
+    DEFAULT_MODEL = "nari-labs/Dia2-1B"
+    # Dia2 decodes through Mimi at 24 kHz (Dia 1 was 44.1 kHz). The real rate
+    # is read off the loaded model in __init__; this is the advertised default.
+    SAMPLE_RATE = 24000
     DEFAULT_LANGUAGE = "English"
     LANGUAGES = ["English"]
     SPEAKERS: list[str] = []   # none; use [S1]/[S2] tags in the text
+    SUPPORTS_MARKS = True
 
     def __init__(self, settings: Settings, model_id: str | None = None):
         super().__init__(settings, model_id)
-        from dia.model import Dia  # heavy import, kept local
+        from dia2 import Dia2, GenerationConfig  # heavy import, kept local
 
-        # Dia takes a string compute dtype; our settings.dtype already matches.
-        self.model = Dia.from_pretrained(
-            self.model_id, compute_dtype=settings.dtype or "float16"
+        self._GenerationConfig = GenerationConfig
+        # Dia2's resolve_precision understands only auto/bfloat16/float32, so
+        # TTS_DTYPE=float16 — valid for the other backends — would abort the
+        # load with an opaque "Unsupported dtype". bfloat16 is the nearest
+        # equivalent and what the model is trained and documented for.
+        dtype = settings.dtype or "auto"
+        if dtype == "float16":
+            log.warning(
+                "Dia2 does not support float16; loading %s in bfloat16 instead.",
+                self.model_id,
+            )
+            dtype = "bfloat16"
+        log.info("Loading %s on %s (%s) ...", self.model_id, settings.device, dtype)
+        self.model = Dia2.from_repo(
+            self.model_id, device=settings.device, dtype=dtype,
         )
+        # from_repo is lazy — it resolves assets but builds no runtime, so a
+        # bad checkpoint or a missing CUDA build would otherwise surface on a
+        # user's first request instead of at startup. Reading sample_rate
+        # forces the build, and gives us the model's real rate rather than a
+        # guess: the WAV header and X-Sample-Rate are written from this.
+        self.sample_rate = int(self.model.sample_rate)
+        if self.sample_rate != self.SAMPLE_RATE:
+            log.info(
+                "%s decodes at %d Hz (advertised default is %d Hz).",
+                self.model_id, self.sample_rate, self.SAMPLE_RATE,
+            )
 
     def warmup(self) -> None:
         try:
@@ -494,30 +537,136 @@ class DiaEngine(TTSEngine):
             log.exception("Warmup failed (continuing anyway).")
 
     def stream(self, req: TTSRequest) -> Iterator[np.ndarray]:
+        # Audio-only view of stream_marked(): one code path, so the two can
+        # never drift.
+        for chunk, _marks in self.stream_marked(req):
+            yield chunk
+
+    def stream_marked(
+        self, req: TTSRequest
+    ) -> Iterator[tuple[np.ndarray, list[Mark]]]:
         mode = req.resolve_mode()
         if mode == "voice_design":
             raise ValueError(
-                "Dia has no voice_design mode. Use [S1]/[S2] dialogue tags, "
-                "or voice_clone with a reference audio prompt."
+                "Dia2 has no voice_design mode. Use [S1]/[S2] dialogue tags, "
+                "or voice_clone with reference audio."
             )
 
-        text = req.text
         kwargs: dict = {}
+        staged: list[str] = []
         if mode == "voice_clone":
             if not req.ref_audio:
-                raise ValueError("voice_clone requires 'ref_audio' for Dia.")
-            kwargs["audio_prompt"] = req.ref_audio
-            # Dia clones best when the reference transcript prefixes the target.
-            if req.ref_text:
-                text = f"{req.ref_text}\n{req.text}"
+                raise ValueError("voice_clone requires 'ref_audio' for Dia2.")
+            # One prefix per speaker; a second is optional and comma-separated.
+            refs = [r.strip() for r in req.ref_audio.split(",") if r.strip()]
+            paths = [_ref_audio_path(r, staged) for r in refs[:2]]
+            kwargs["prefix_speaker_1"] = paths[0]
+            if len(paths) > 1:
+                kwargs["prefix_speaker_2"] = paths[1]
 
-        audio = self.model.generate(text, verbose=False, **kwargs)
-        audio = _as_float_mono(audio)
+        try:
+            result = self.model.generate(req.text, verbose=False, **kwargs)
+        finally:
+            for path in staged:
+                _unlink_quietly(path)
+
+        audio = _as_float_mono(result.waveform)
+        sr = int(getattr(result, "sample_rate", 0)) or self.sample_rate
+        if sr != self.sample_rate:
+            # Same reasoning as QwenEngine: the header the client already
+            # received was written from self.sample_rate, so report rather
+            # than mutate.
+            log.warning(
+                "%s returned %d Hz but the engine advertises %d Hz; audio will "
+                "play at the wrong rate. Set TTS_SAMPLE_RATE=%d.",
+                self.model_id, sr, self.sample_rate, sr,
+            )
+
+        marks = _dia2_marks(
+            getattr(result, "timestamps", None) or [],
+            duration=len(audio) / sr if sr else 0.0,
+        )
         step = self.settings.stream_chunk_samples
+        offset = 0
         for s in range(0, len(audio), step):
             frame = audio[s:s + step]
-            if frame.size:
-                yield frame
+            if not frame.size:
+                continue
+            frame_end = (offset + frame.size) / sr
+            # Emit each mark with the frame whose range contains its start; on
+            # the final frame flush whatever is left, so a trailing word whose
+            # timestamp rounds past the end of the audio is never dropped.
+            last = s + step >= len(audio)
+            out = [m for m in marks if m.start < frame_end or last]
+            marks = [m for m in marks if m.start >= frame_end and not last]
+            offset += frame.size
+            yield frame, out
+
+
+def _dia2_marks(timestamps, duration: float) -> list[Mark]:
+    """Dia2's ``[(word, start_seconds)]`` -> our word marks.
+
+    Dia2 reports only a start per word (derived from Mimi's ~12.5 Hz frame
+    grid), so each word is taken to run until the next one begins, and the
+    last until the audio ends.
+    """
+    pairs = [
+        (str(word), float(start))
+        for word, start in timestamps
+        if str(word).strip()
+    ]
+    marks: list[Mark] = []
+    for i, (word, start) in enumerate(pairs):
+        end = pairs[i + 1][1] if i + 1 < len(pairs) else duration
+        marks.append(
+            Mark(kind="word", text=word, phonemes="",
+                 start=start, end=max(end, start))
+        )
+    return marks
+
+
+def _ref_audio_path(ref: str, staged: list[str]) -> str:
+    """Resolve ``ref_audio`` to a path on disk for Dia2 prefix conditioning.
+
+    Dia2 loads and auto-transcribes the reference from a file, so a base64
+    payload (what the HTTP/WS clients send) has to be written out first. Any
+    file created here is appended to ``staged`` for the caller to delete.
+    """
+    import base64
+    import binascii
+    import os
+    import tempfile
+
+    if os.path.isfile(ref):
+        return ref
+    if ref.startswith(("http://", "https://")):
+        raise ValueError(
+            "Dia2 needs reference audio as a local file path or base64; "
+            f"URLs are not fetched server-side (got {ref[:40]!r})."
+        )
+    payload = ref.split(",", 1)[-1] if ref.startswith("data:") else ref
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(
+            "ref_audio is neither an existing file path nor valid base64 audio."
+        ) from exc
+    if not raw:
+        raise ValueError("ref_audio decoded to an empty file.")
+    fd, path = tempfile.mkstemp(suffix=".wav", prefix="dia2-ref-")
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(raw)
+    staged.append(path)
+    return path
+
+
+def _unlink_quietly(path: str) -> None:
+    import os
+
+    try:
+        os.unlink(path)
+    except OSError:  # pragma: no cover - best-effort temp cleanup
+        log.debug("Could not remove temp reference audio %s", path)
 
 
 # --------------------------------------------------------------------------- #

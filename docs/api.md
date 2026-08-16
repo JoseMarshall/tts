@@ -108,7 +108,7 @@ Lists selectable models (with their backend) in an OpenAI-shaped envelope. Each
   "data": [
     {"id": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", "object": "model", "backend": "qwen"},
     {"id": "hexgrad/Kokoro-82M", "object": "model", "backend": "kokoro"},
-    {"id": "nari-labs/Dia-1.6B", "object": "model", "backend": "dia"}
+    {"id": "nari-labs/Dia2-1B", "object": "model", "backend": "dia"}
   ],
   "default": "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
   "backends": ["dia", "kokoro", "qwen"]

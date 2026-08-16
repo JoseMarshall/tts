@@ -124,7 +124,7 @@ def test_resolve_unknown_model_when_not_permissive():
     # Default backend qwen (not mock) -> unknown ids are rejected.
     mgr = EngineManager(Settings(backend="qwen", model_id="qwen", backends=""))
     with pytest.raises(UnknownModelError):
-        mgr.resolve("nari-labs/Dia-1.6B")   # dia not enabled here
+        mgr.resolve("nari-labs/Dia2-1B")   # dia not enabled here
 
 
 def test_kokoro_lang_code_mapping():
