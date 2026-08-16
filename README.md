@@ -11,7 +11,7 @@ the model emits its first packet, rather than after the whole clip is generated.
 | `mock` | — | Dependency-free tone generator. Runs anywhere; used for dev/CI. |
 | `qwen` | [Qwen3-TTS](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice) | CUDA GPU. Custom voice / cloning / (design checkpoint). |
 | `kokoro` | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) | Tiny (~350 MB), CPU or GPU. Preset voices, many languages. |
-| `dia` | [Dia-1.6B](https://huggingface.co/nari-labs/Dia-1.6B) | GPU. Dialogue with `[S1]`/`[S2]` tags; 44.1 kHz; voice cloning. |
+| `dia` | [Dia2-1B](https://huggingface.co/nari-labs/Dia2-1B) | CUDA only. Dialogue with `[S1]`/`[S2]` tags; 24 kHz; voice cloning; timing marks. |
 
 **One server can host several backends at once** and the client picks per request
 (by backend name or model id) — see [Selecting a backend](#selecting-a-backend-per-request).
@@ -110,18 +110,28 @@ curl -s -X POST localhost:8000/v1/tts/stream \
   -o kokoro.wav
 ```
 
-### Dia-1.6B (`dia`) — GPU
+### Dia2-1B (`dia`) — CUDA only
 
 ```bash
 pip install -r requirements.txt
-pip install -U git+https://github.com/nari-labs/dia.git soundfile
+# Dia2 requires torch >= 2.8 built for CUDA 12.8+; a CPU build cannot run it.
+pip install -U torch --index-url https://download.pytorch.org/whl/cu128
+pip install -U git+https://github.com/nari-labs/dia2.git soundfile
 
 export TTS_BACKEND=dia
-export TTS_MODEL_ID=nari-labs/Dia-1.6B
+export TTS_MODEL_ID=nari-labs/Dia2-1B
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Dia is a **dialogue** model: mark speakers inline with `[S1]`/`[S2]` and add
+Dia2 supersedes Dia 1.6B and ships as a **different package** (`dia2`, not
+`dia`): the engine loads it with `Dia2.from_repo`, output moves from 44.1 kHz
+to Mimi's **24 kHz**, and results carry **word timestamps**, so this backend
+emits timing marks over the WebSocket like Kokoro does. Voice cloning is
+prefix conditioning — pass reference audio as `ref_audio` (a file path or
+base64; two comma-separated refs conditions `[S1]` and `[S2]` separately) and
+Dia2 transcribes it itself, so `ref_text` is not needed.
+
+Dia2 is a **dialogue** model: mark speakers inline with `[S1]`/`[S2]` and add
 non-verbals like `(laughs)`. It has no preset speakers; for a consistent voice,
 clone one with `ref_audio` (+ `ref_text`). Output is 44.1 kHz.
 

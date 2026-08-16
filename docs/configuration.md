@@ -9,7 +9,7 @@ startup via `app/config.py`.
 ### Backend
 | Variable | Default | Description |
 |---|---|---|
-| `TTS_BACKEND` | `mock` | **Default** engine: `mock`, `qwen` (Qwen3-TTS, GPU), `kokoro` (Kokoro-82M, CPU/GPU), `dia` (Dia-1.6B, GPU). Validated at startup. |
+| `TTS_BACKEND` | `mock` | **Default** engine: `mock`, `qwen` (Qwen3-TTS, GPU), `kokoro` (Kokoro-82M, CPU/GPU), `dia` (Dia2-1B, CUDA only). Validated at startup. |
 | `TTS_BACKENDS` | *(empty)* | Comma-separated extra backends clients may select **by name** (default backend always enabled). |
 
 ### Model loading (real backends)

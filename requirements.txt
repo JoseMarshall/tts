@@ -21,8 +21,10 @@ numpy>=1.26
 #   #   Debian/Ubuntu: sudo apt-get install espeak-ng
 #   #   macOS: brew install espeak-ng
 #
-# Dia-1.6B  (TTS_BACKEND=dia)  -- needs a CUDA GPU:
-#   pip install -U git+https://github.com/nari-labs/dia.git soundfile
+# Dia2-1B  (TTS_BACKEND=dia)  -- CUDA only; needs torch >= 2.8 built for
+# CUDA 12.8+. A CPU torch build cannot run this backend at all.
+#   pip install -U torch --index-url https://download.pytorch.org/whl/cu128
+#   pip install -U git+https://github.com/nari-labs/dia2.git soundfile
 #
 # Multiple backends can be installed together and selected per request; see
 # TTS_BACKENDS in .env.example.

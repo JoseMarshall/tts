@@ -57,9 +57,11 @@ class's `capabilities()` (speakers, languages, defaults). Class metadata
 - **`KokoroEngine`** — loads Kokoro-82M via `KPipeline` (one pipeline cached per
   language code). Kokoro yields per text segment, which the engine re-slices
   into fixed frames. Preset voices only; cloning/design raise `ValueError`→`400`.
-- **`DiaEngine`** — loads Dia-1.6B (`dia` package). Dialogue via `[S1]`/`[S2]`
-  tags, no preset speakers; optional voice cloning via `audio_prompt`. Outputs
-  44.1 kHz and isn't natively streaming, so it generates then re-chunks.
+- **`DiaEngine`** — loads Dia2-1B (`dia2` package, `Dia2.from_repo`). Dialogue
+  via `[S1]`/`[S2]` tags, no preset speakers; voice cloning by prefix
+  conditioning on reference audio. Outputs Mimi's 24 kHz and hands back one
+  finished waveform, so it generates then re-chunks; the result's word
+  timestamps become timing marks (`SUPPORTS_MARKS`).
 
 ### `Synthesizer` (`streaming.py`)
 Owns an engine pool plus the concurrency machinery:
