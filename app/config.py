@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Size of each streamed audio frame, in samples. Smaller = lower latency,
     # more overhead. ~50 ms at 24 kHz is a good default.
     stream_chunk_samples: int = 1200
+    # Send word-level timing marks on the WebSocket API when the selected
+    # engine provides them (e.g. Kokoro). TTS_EMIT_MARKS=0 disables them.
+    emit_marks: bool = True
 
     # ---- Generation defaults ----------------------------------------------
     # Empty means "let the active backend pick its own default" (e.g. Qwen ->
@@ -58,6 +61,12 @@ class Settings(BaseSettings):
     # ---- Concurrency -------------------------------------------------------
     # A single model instance is not safe for concurrent generation, so calls
     # are serialised. This bounds how many requests may queue before we reject.
+    max_queue: int = 32
+    # How many independent instances of each model to load. 1 (the default)
+    # reproduces the old single-engine behaviour exactly. >1 multiplies VRAM by
+    # that factor and only applies to backends that set SUPPORTS_REPLICAS.
+    engine_replicas: int = 1
+
     # ---- Server ------------------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8000
@@ -102,6 +111,24 @@ class _SSTSettings(BaseSettings):
     default_language: str = ""                 # language hint for auto-detect fallback
     stream_chunk_samples: int = 1600           # ~100 ms at 16 kHz per chunk
     max_input_seconds: float = 30.0            # reject longer segments to guard GPU
+
+    # ---- Voice activity detection (/v1/sst_ws) -----------------------------
+    # Which detector to build when a session enables VAD. Nothing is imported
+    # until then, so the server still starts with none of these installed.
+    #   silero  — accurate, CPU, needs `pip install silero-vad`
+    #   energy  — RMS + adaptive noise floor, no dependencies
+    #   webrtc  — needs `pip install webrtcvad`
+    vad: str = "silero"
+    # Auto-flush changes session semantics (transcription fires on silence
+    # instead of on an explicit `flush`), so it is opt-in per session by
+    # default. Set SST_VAD_AUTO_FLUSH=1 to make it the default for a
+    # deployment where every client wants it.
+    vad_auto_flush: bool = False
+    vad_threshold: float = 0.5                 # speech_prob at/above this = speech
+    vad_speech_ms: int = 120                   # speech needed to confirm onset
+    vad_silence_ms: int = 700                  # trailing silence that ends a turn
+    vad_pre_roll_ms: int = 300                 # audio kept from before onset
+    vad_max_utterance_s: float = 30.0          # hard cap; also bounds the buffer
 
     # ---- Concurrency / Server ----------------------------------------------
     max_queue: int = 32

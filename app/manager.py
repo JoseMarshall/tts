@@ -32,7 +32,7 @@ from .engine import (
     sst_engine_default_model,
 )
 from .streaming import Transcriber  # forward-ref to avoid circular issues; imported at runtime via module-level access
-from .streaming import Synthesizer
+from .streaming import EnginePool, Synthesizer
 
 log = logging.getLogger("tts.manager")
 
@@ -149,7 +149,13 @@ class EngineManager:
         raise UnknownModelError(model)
 
     async def get(self, model: str | None = None) -> Synthesizer:
-        """Return the Synthesizer for the requested model, building it lazily."""
+        """Return the Synthesizer for the requested model, building it lazily.
+
+        Only the first replica is built before returning — loading N models up
+        front would trade a throughput problem for a latency one, and the pool
+        serves whatever is free, so a partially-filled pool is just a smaller
+        pool.
+        """
         spec = self.resolve(model)
         if spec.key in self._synths:
             return self._synths[spec.key]
@@ -160,9 +166,29 @@ class EngineManager:
                 engine = await loop.run_in_executor(
                     None, self._build, spec
                 )
-                self._synths[spec.key] = Synthesizer(engine, self.settings)
-                log.info("Model ready: %s", spec.key)
+                replicas = self._replica_count(engine, spec)
+                pool = EnginePool(
+                    engine, build=lambda s=spec: self._build(s), size=replicas
+                )
+                self._synths[spec.key] = Synthesizer(pool, self.settings)
+                log.info("Model ready: %s (replicas=%d)", spec.key, replicas)
+                if replicas > 1:
+                    asyncio.create_task(pool.fill())
         return self._synths[spec.key]
+
+    def _replica_count(self, engine, spec: ModelSpec) -> int:
+        """How many instances of this model to run, given what it supports."""
+        want = max(1, int(self.settings.engine_replicas))
+        if want > 1 and not engine.SUPPORTS_REPLICAS:
+            # Silently running N would risk wrong output, not a crash — the
+            # worst failure mode, because it reads as a model quality problem.
+            log.warning(
+                "TTS_ENGINE_REPLICAS=%d but backend %r has not declared "
+                "SUPPORTS_REPLICAS; running 1 instance of %s.",
+                want, spec.backend, spec.key,
+            )
+            return 1
+        return want
 
     def _build(self, spec: ModelSpec):
         # Build the right engine class for this spec's backend.

@@ -127,9 +127,19 @@ Capabilities for a model's backend. Defaults to the default model; pass
   "speakers": ["Vivian", "Serena", "Uncle_Fu", "..."],
   "languages": ["Auto", "Chinese", "English", "..."],
   "default_speaker": "Vivian",
-  "default_language": "Auto"
+  "default_language": "Auto",
+  "supports_marks": false,
+  "supports_replicas": false
 }
 ```
+
+`supports_marks` tells you the backend emits word-level timing marks on the
+WebSocket API (`true` for Kokoro) — see
+[`websocket.md`](websocket.md#timing-marks-lip-sync).
+
+`supports_replicas` is operator-facing: whether this backend may run several
+concurrent instances via `TTS_ENGINE_REPLICAS`. It does not change the request
+API — see [`configuration.md`](configuration.md#concurrency).
 
 For `kokoro`, speakers are voices like `af_heart`/`bm_george`; for `dia`,
 speakers are empty (use `[S1]`/`[S2]` tags). The `mock` backend returns empty

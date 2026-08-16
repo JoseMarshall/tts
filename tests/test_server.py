@@ -15,6 +15,8 @@ from app.audio import float_to_pcm16, pcm_to_wav, wav_header
 from app.engine import (
     DiaEngine,
     KokoroEngine,
+    Mark,
+    MockEngine,
     QwenEngine,
     available_backends,
     engine_class,
@@ -302,6 +304,217 @@ def test_ws_model_override(client):
         start = ws.receive_json()
         assert start["type"] == "start"
         assert start["model"] == "another-model"
+        ws.send_json({"type": "close"})
+
+
+# ---- timing marks ---------------------------------------------------------- #
+class _FakeToken:
+    """Minimal stand-in for misaki's MToken (word + optional timestamps)."""
+
+    def __init__(self, text, phonemes, start_ts=None, end_ts=None):
+        self.text = text
+        self.phonemes = phonemes
+        self.start_ts = start_ts
+        self.end_ts = end_ts
+
+
+class _FakeResult:
+    """Minimal stand-in for kokoro's KPipeline.Result."""
+
+    def __init__(self, audio, tokens=None):
+        self.audio = audio
+        self.tokens = tokens
+
+
+class _FakePipeline:
+    def __init__(self, results):
+        self._results = list(results)
+
+    def __call__(self, text, voice=None, speed=1.0):
+        return iter(self._results)
+
+
+def _kokoro_with(results, chunk=12000):
+    """A KokoroEngine wired to a stub pipeline (no kokoro package, no model)."""
+    from app.config import Settings
+    from app.engine import TTSEngine
+    eng = KokoroEngine.__new__(KokoroEngine)  # bypass __init__ (imports kokoro)
+    TTSEngine.__init__(eng, Settings(stream_chunk_samples=chunk))
+    eng._pipelines = {"a": _FakePipeline(results)}
+    return eng
+
+
+def test_supports_marks_capabilities():
+    assert KokoroEngine.SUPPORTS_MARKS is True
+    assert KokoroEngine.capabilities()["supports_marks"] is True
+    for cls in (MockEngine, QwenEngine, DiaEngine):
+        assert cls.SUPPORTS_MARKS is False
+        assert cls.capabilities()["supports_marks"] is False
+
+
+def test_voices_advertises_supports_marks(client):
+    # Mock backend has no timings; kokoro's capability is on the class (above).
+    assert client.get("/v1/voices").json()["supports_marks"] is False
+
+
+def test_default_stream_marked_matches_stream():
+    from app.config import Settings
+    eng = MockEngine(Settings())
+    req = TTSRequest(text="hello world")
+    marked = list(eng.stream_marked(req))
+    assert marked and all(marks == [] for _, marks in marked)
+    np.testing.assert_array_equal(
+        np.concatenate([c for c, _ in marked]),
+        np.concatenate(list(eng.stream(req))),
+    )
+
+
+def test_kokoro_stream_marked_offsets():
+    chunk = 12000  # samples -> 0.5 s frames at 24 kHz
+    seg1 = np.full(2 * chunk, 0.1, dtype=np.float32)   # 1.0 s -> two frames
+    seg3 = np.full(chunk, 0.2, dtype=np.float32)       # 0.5 s -> one frame
+    eng = _kokoro_with([
+        _FakeResult(seg1, tokens=[
+            _FakeToken("Hello", "həlˈoʊ", 0.0, 0.5),
+            _FakeToken("world", "wˈɜːld", 0.5, 1.0),
+            _FakeToken(",", None, 0.9, 1.0),        # no phonemes -> skipped
+            _FakeToken("um", "ʌm"),                  # untimed -> skipped
+        ]),
+        _FakeResult(None),                             # no audio: offset must not advance
+        _FakeResult(seg3, tokens=[
+            _FakeToken("again", "əɡˈɛn", 0.0, 0.5),
+            _FakeToken("tail", "tˈeɪl", 0.625, 0.75),  # past seg end -> flushed
+        ]),
+    ])
+
+    chunks = list(eng.stream_marked(TTSRequest(text="Hello world, um, again tail")))
+    assert [len(c) for c, _ in chunks] == [chunk, chunk, chunk]
+
+    # stream() must yield the exact same audio (single code path).
+    np.testing.assert_array_equal(
+        np.concatenate([c for c, _ in chunks]),
+        np.concatenate(list(eng.stream(TTSRequest(text="x")))),
+    )
+
+    f0, f1, f2 = [marks for _, marks in chunks]
+    assert [m.text for m in f0] == ["Hello"]
+    assert [m.text for m in f1] == ["world"]
+    assert [m.text for m in f2] == ["again", "tail"]
+
+    # Times are rebased onto the request timeline across segments.
+    assert (f0[0].start, f0[0].end) == (0.0, 0.5)
+    assert (f1[0].start, f1[0].end) == (0.5, 1.0)
+    assert (f2[0].start, f2[0].end) == (1.0, 1.5)    # after 1.0 s of seg1 audio
+    assert (f2[1].start, f2[1].end) == (1.625, 1.75)  # 1.0 + segment-relative
+    assert all(m.kind == "word" for m in f0 + f1 + f2)
+    assert f0[0].phonemes == "həlˈoʊ"
+
+
+def test_kokoro_stream_marked_ignores_untimed_results():
+    # A segment with tokens=None (non-English pipelines) simply yields no marks.
+    eng = _kokoro_with([_FakeResult(np.zeros(12000, dtype=np.float32))])
+    chunks = list(eng.stream_marked(TTSRequest(text="quiet")))
+    assert len(chunks) == 1 and chunks[0][1] == []
+
+
+class _MarkedMockEngine(MockEngine):
+    """Mock engine that also emits word marks (stands in for Kokoro)."""
+
+    SUPPORTS_MARKS = True
+
+    def stream_marked(self, req):
+        step = self.settings.stream_chunk_samples
+        sr = self.sample_rate
+        marks = [
+            Mark("word", "hello", "hɛlˈoʊ", 0.0, step / sr),
+            Mark("word", "world", "wˈɜːld", 2 * step / sr, 3 * step / sr),
+        ]
+        for i in range(3):  # three frames of tone
+            lo, hi = i * step / sr, (i + 1) * step / sr
+            frame = np.full(step, 0.01 * (i + 1), dtype=np.float32)
+            yield frame, [m for m in marks if lo <= m.start < hi]
+
+
+def _patch_manager_get(monkeypatch, client, synth):
+    async def _get(model=None):
+        return synth
+    monkeypatch.setattr(client.app.state.tts_manager, "get", _get)
+
+
+def _collect_until_end(ws):
+    """Collect WS frames until 'end'; 'audio' for binaries, else the JSON."""
+    events = []
+    while True:
+        frame = ws.receive()
+        if "bytes" in frame and frame["bytes"] is not None:
+            events.append("audio")
+        else:
+            msg = json.loads(frame["text"])
+            events.append(msg)
+            if msg["type"] == "end":
+                return events
+
+
+def test_ws_marks(client, monkeypatch):
+    from app.config import Settings
+    from app.streaming import Synthesizer
+    settings = Settings()
+    synth = Synthesizer(_MarkedMockEngine(settings), settings)
+    _patch_manager_get(monkeypatch, client, synth)
+
+    with client.websocket_connect("/v1/tts/ws") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "synthesize", "text": "hello world",
+                      "request_id": "m1", "response_format": "pcm"})
+        start = ws.receive_json()
+        assert start["type"] == "start" and start["supports_marks"] is True
+
+        events = _collect_until_end(ws)
+
+    kinds = ["audio" if e == "audio" else e["type"] for e in events]
+    # Each marks frame immediately precedes the audio frame it covers.
+    assert kinds == ["marks", "audio", "audio", "marks", "audio", "end"]
+
+    frames = [e for e in events if isinstance(e, dict) and e["type"] == "marks"]
+    assert [f["request_id"] for f in frames] == ["m1", "m1"]
+    assert frames[0]["marks"] == [
+        {"kind": "word", "text": "hello", "phonemes": "hɛlˈoʊ",
+         "start": 0.0, "end": 0.05}
+    ]
+    assert frames[1]["marks"][0]["text"] == "world"
+    assert (frames[1]["marks"][0]["start"],
+            frames[1]["marks"][0]["end"]) == (0.1, 0.15)
+
+
+def test_ws_marks_disabled_by_settings(client, monkeypatch):
+    from app.config import Settings
+    from app.streaming import Synthesizer
+    settings = Settings(emit_marks=False)  # TTS_EMIT_MARKS=0
+    synth = Synthesizer(_MarkedMockEngine(settings), settings)
+    _patch_manager_get(monkeypatch, client, synth)
+
+    with client.websocket_connect("/v1/tts/ws") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "synthesize", "text": "hello world",
+                      "request_id": "m2", "response_format": "pcm"})
+        start = ws.receive_json()
+        assert start["supports_marks"] is True     # capability, not emission
+        events = _collect_until_end(ws)
+
+    kinds = ["audio" if e == "audio" else e["type"] for e in events]
+    assert kinds == ["audio", "audio", "audio", "end"]
+
+
+def test_ws_start_advertises_supports_marks(client):
+    # The mock backend has no timings: start says so, and no marks are sent.
+    with client.websocket_connect("/v1/tts/ws") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_json({"type": "synthesize", "text": "hi", "request_id": "z",
+                      "response_format": "pcm"})
+        start = ws.receive_json()
+        assert start["type"] == "start" and start["supports_marks"] is False
+        events = _collect_until_end(ws)
+        assert all(e == "audio" or e["type"] == "end" for e in events)
         ws.send_json({"type": "close"})
 
 

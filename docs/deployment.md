@@ -77,13 +77,36 @@ with just `requirements.txt` works.
 ## Production notes
 
 ### Workers & scaling
-- Generation is **serialised per model per process** (a model isn't
-  concurrency-safe). To serve more throughput, run **multiple replicas**, each
-  with its own GPU, behind a load balancer.
+
+Two different levers for two different problems.
+
+**Filling a GPU you already paid for → `TTS_ENGINE_REPLICAS`.** One model
+instance is not concurrency-safe, so generation is serialised *per instance*.
+A small model (Kokoro-82M is ~330 MB) leaves most of the card idle between short
+forward passes, and the fix is more instances of it in the same process:
+
+```
+TTS_ENGINE_REPLICAS=4     # 4 concurrent generations, 4x the weights in VRAM
+```
+
+- VRAM scales linearly. Check `GET /health` → `replicas` for what actually
+  loaded, and size it against `nvidia-smi`.
+- Only backends declaring `SUPPORTS_REPLICAS` honour it; others log a warning
+  and run one instance.
+- Measure before committing: if throughput is flat from 1 → 2 → 4, the ceiling
+  is somewhere other than serialisation.
+
+**Failover, rolling restarts, more than one machine → separate processes.** Run
+multiple replicas of the *server*, each with its own GPU, behind a load
+balancer. Replicas inside one process give you none of that.
+
 - Do **not** naively bump `uvicorn --workers` on a single GPU expecting linear
-  speedup — each worker loads its own copy of the model into GPU memory.
+  speedup — each worker loads its own copy of every model. `TTS_ENGINE_REPLICAS`
+  is the granular version of the same idea: it scales one model rather than the
+  whole catalog.
 - Tune `TTS_MAX_QUEUE` to bound queueing latency; excess requests get `503` so
-  clients can retry/backoff rather than wait unboundedly.
+  clients can retry/backoff rather than wait unboundedly. It counts requests
+  in flight (queued plus running) and does not scale with replicas.
 
 ### Latency
 - Lower `TTS_STREAM_CHUNK_SAMPLES` for snappier first-audio at the cost of more

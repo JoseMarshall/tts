@@ -1,7 +1,7 @@
 # Proposal — Timing marks alongside streamed audio
 
-**Status:** proposed · **Affects:** `engine.py`, `streaming.py`, `main.py` (WS only),
-`docs/websocket.md`
+**Status:** implemented · **Affects:** `engine.py`, `streaming.py`, `main.py` (WS only),
+`config.py`, `docs/websocket.md`
 **Driven by:** a lip-synced 3D avatar client that needs to know *when* each sound
 happens, not just what the audio is.
 
@@ -50,6 +50,13 @@ already computed, already in memory, currently dropped one line before it could 
 > Verify the field names and the `join_timestamps` arithmetic against the installed
 > kokoro version before implementing. The fields above are from the current upstream
 > source; nothing is installed in `.venv` today, so this has not been run.
+
+**Verified** against kokoro 0.7.16 (PyPI latest, inspected from the wheel) and
+current GitHub main: `Result(graphemes, phonemes, tokens=None, output=None)` with
+`.audio`/`.pred_dur` properties (`text_index` exists only on main — hence the
+`getattr` access), `MToken.text`/`.phonemes`/`.start_ts`/`.end_ts`, and
+`join_timestamps` writing **seconds** (`pred_dur` frames × 600 samples @ 24 kHz).
+Note: non-English pipelines yield `tokens=None`, so marks are English-only today.
 
 Resolution note: `MToken` timestamps are per **token** (roughly per word) with that
 token's phoneme string attached. True per-phoneme timing means subdividing with
@@ -135,17 +142,22 @@ bytes back.
 - **Per-phoneme resolution in v1.** `pred_dur` is right there when word-level proves
   insufficient.
 
-## Open questions
+## Open questions (resolved during implementation)
 
-1. **Does `speed` scale the timestamps?** Kokoro applies `speed` inside the pipeline. If
-   `start_ts` reflects pre-speed timing, marks must be divided by `speed` before they go
-   on the wire. Needs one experiment at `speed=1.5`.
-2. **Segment boundaries and silence.** Kokoro emits nothing for some segments (the
-   existing `if audio is None: continue`). Confirm the sample offset advances correctly
-   when a segment contributes no audio, or everything after the first pause is late.
-3. **Cancellation mid-sentence.** Marks already sent describe audio the client may never
-   play. Client-side concern, but `docs/websocket.md` should say so explicitly rather
-   than leaving each client to discover it.
+1. **Does `speed` scale the timestamps?** No correction needed: `KModel.forward`
+   computes `duration = sigmoid(...).sum(-1) / speed` *before* rounding to
+   `pred_dur`, and the audio is generated from that same `pred_dur`. Timestamps
+   are therefore post-speed and match the output audio at any rate.
+2. **Segment boundaries and silence.** The implementation keeps a running sample
+   offset across segments that advances only by samples actually emitted; a
+   segment with `audio is None` contributes nothing, so nothing drifts after a
+   pause. Marks are rebased by the offset at their segment's start, and each
+   mark rides the frame whose range contains its start (the segment's final
+   frame flushes any stragglers — `join_timestamps` rounding can push a final
+   token just past the audio end).
+3. **Cancellation mid-sentence.** Documented in `docs/websocket.md`: marks
+   already received describe audio that may never be played; clients discard
+   them together with the unplayed audio.
 
 ## Not in this proposal
 
@@ -153,6 +165,9 @@ bytes back.
   an explicit `flush`, so a client cannot do hands-free turn-taking or barge-in. This is
   the next most valuable server change after marks and deserves its own proposal — it
   alters session semantics rather than adding a frame type.
+  → now [`vad-auto-flush.md`](vad-auto-flush.md).
 - **Concurrent generation.** One model, serialised behind `Semaphore(1)`, `503` past
   `TTS_MAX_QUEUE`. A real ceiling, but replicas behind a load balancer solve it without
   redesigning anything, and nothing here makes it worse.
+  → now [`concurrent-generation.md`](concurrent-generation.md), which takes the narrower
+  position that the unit of scaling should be the model rather than the process.

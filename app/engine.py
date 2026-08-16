@@ -24,7 +24,9 @@ Adding a new backend is self-contained:
             ...  # yield float32 mono numpy chunks
 
 That's it — routing, streaming, WebSocket, the manager and audio framing are all
-model-agnostic and need no changes.
+model-agnostic and need no changes. If the model also computes word/phoneme
+timings, set ``SUPPORTS_MARKS = True`` and override ``stream_marked()`` so
+WebSocket clients can receive timing marks alongside the audio.
 
 Backends bundled here:
 * ``MockEngine``   — dependency-free tone generator (no GPU / no downloads).
@@ -36,7 +38,8 @@ from __future__ import annotations
 
 import abc
 import logging
-from typing import Iterator
+from dataclasses import dataclass
+from typing import Iterator, Literal
 
 import numpy as np
 
@@ -79,6 +82,27 @@ def engine_default_model(name: str) -> str:
     return engine_class(name).DEFAULT_MODEL or name
 
 
+# --------------------------------------------------------------------------- #
+# Timing marks
+# --------------------------------------------------------------------------- #
+@dataclass
+class Mark:
+    """A word (or phoneme) and when it occurs in the synthesized audio.
+
+    ``start``/``end`` are seconds relative to the start of THIS request (the
+    first emitted sample is t=0), so they line up with the concatenated audio
+    the client receives. For ``kind == "word"``, ``text`` is the grapheme and
+    ``phonemes`` that token's phoneme string; for ``kind == "phoneme"``,
+    ``text`` is the symbol itself and ``phonemes`` is empty.
+    """
+
+    kind: Literal["word", "phoneme"]
+    text: str
+    phonemes: str
+    start: float
+    end: float
+
+
 class TTSEngine(abc.ABC):
     # ---- backend metadata (override in subclasses) ------------------------ #
     NAME: str = ""
@@ -88,6 +112,16 @@ class TTSEngine(abc.ABC):
     LANGUAGES: list[str] = []
     DEFAULT_SPEAKER: str = ""
     DEFAULT_LANGUAGE: str = ""
+    # True when the engine can emit word/phoneme timing marks (i.e. overrides
+    # stream_marked). Advertised via capabilities() and GET /v1/voices.
+    SUPPORTS_MARKS: bool = False
+    # True when N instances of this backend can generate concurrently. Two
+    # Python objects are not two independent models if they share a global
+    # underneath — espeak-ng, a module-level cache, a single CUDA stream — and
+    # that failure shows up as wrong output rather than a crash. So this is
+    # opt-in per backend: TTS_ENGINE_REPLICAS>1 on a backend that has not
+    # verified it runs with one instance and logs a warning.
+    SUPPORTS_REPLICAS: bool = False
 
     def __init__(self, settings: Settings, model_id: str | None = None):
         self.settings = settings
@@ -97,6 +131,19 @@ class TTSEngine(abc.ABC):
     @abc.abstractmethod
     def stream(self, req: TTSRequest) -> Iterator[np.ndarray]:
         """Yield successive float32 mono audio chunks for ``req``."""
+
+    def stream_marked(
+        self, req: TTSRequest
+    ) -> Iterator[tuple[np.ndarray, list[Mark]]]:
+        """Yield ``(audio chunk, marks)`` pairs: each chunk plus any marks
+        whose time range falls inside it.
+
+        The default costs nothing and never emits marks; engines that have
+        timing information (``SUPPORTS_MARKS = True``) override this and
+        define ``stream()`` in terms of it, so the two cannot drift.
+        """
+        for chunk in self.stream(req):
+            yield chunk, []
 
     def synthesize(self, req: TTSRequest) -> np.ndarray:
         """Full (non-streaming) synthesis — concatenate the stream."""
@@ -123,6 +170,8 @@ class TTSEngine(abc.ABC):
             "languages": cls.LANGUAGES,
             "default_speaker": cls.DEFAULT_SPEAKER,
             "default_language": cls.DEFAULT_LANGUAGE,
+            "supports_marks": cls.SUPPORTS_MARKS,
+            "supports_replicas": cls.SUPPORTS_REPLICAS,
         }
 
 
@@ -139,6 +188,7 @@ class MockEngine(TTSEngine):
 
     NAME = "mock"
     DEFAULT_MODEL = "mock"
+    SUPPORTS_REPLICAS = True   # pure numpy, no shared state to corrupt
 
     def stream(self, req: TTSRequest) -> Iterator[np.ndarray]:
         sr = self.sample_rate
@@ -240,7 +290,17 @@ class QwenEngine(TTSEngine):
 
         # Fallback: generate the whole clip, then slice it into frames.
         wavs, sr = method(**kwargs)
-        self.sample_rate = int(sr) or self.sample_rate
+        # Deliberately NOT `self.sample_rate = sr`: the WAV header and the
+        # X-Sample-Rate response header were both written before this line
+        # runs, so mutating it here would only make the engine disagree with
+        # what the client was already told (and, with replicas, disagree with
+        # its own siblings). Report the mismatch instead.
+        if int(sr or 0) and int(sr) != self.sample_rate:
+            log.warning(
+                "%s returned %d Hz but the engine advertises %d Hz; audio will "
+                "play at the wrong rate. Set TTS_SAMPLE_RATE=%d.",
+                self.model_id, int(sr), self.sample_rate, int(sr),
+            )
         audio = _as_float_mono(_first_wav(wavs))
         step = self.settings.stream_chunk_samples
         for start in range(0, len(audio), step):
@@ -292,6 +352,7 @@ class KokoroEngine(TTSEngine):
     SAMPLE_RATE = 24000
     DEFAULT_SPEAKER = "af_heart"
     DEFAULT_LANGUAGE = "a"
+    SUPPORTS_MARKS = True
     LANGUAGES = [
         "American English", "British English", "Spanish", "French", "Hindi",
         "Italian", "Japanese", "Brazilian Portuguese", "Mandarin Chinese",
@@ -327,6 +388,14 @@ class KokoroEngine(TTSEngine):
             log.exception("Warmup failed (continuing anyway).")
 
     def stream(self, req: TTSRequest) -> Iterator[np.ndarray]:
+        # Audio-only view of stream_marked(): one code path, so the two can
+        # never drift.
+        for chunk, _marks in self.stream_marked(req):
+            yield chunk
+
+    def stream_marked(
+        self, req: TTSRequest
+    ) -> Iterator[tuple[np.ndarray, list[Mark]]]:
         mode = req.resolve_mode()
         if mode != "custom_voice":
             raise ValueError(
@@ -338,20 +407,56 @@ class KokoroEngine(TTSEngine):
         speed = req.speed or 1.0
         pipeline = self._pipeline(lang_code)
         step = self.settings.stream_chunk_samples
+        sr = self.sample_rate
 
         # Kokoro yields per text segment (naturally streaming). Re-slice each
         # segment into fixed frames for smooth, consistent delivery downstream.
+        #
+        # Marks come free: KPipeline.join_timestamps writes start_ts/end_ts
+        # (seconds, relative to the SEGMENT) onto each token, using the same
+        # pred_dur the audio was generated from — and already scaled by
+        # `speed` inside the model, so no rate correction is needed here.
+        # Non-English pipelines yield tokens=None and simply produce no marks.
+        offset = 0  # samples emitted so far, across all segments
         for result in pipeline(req.text, voice=voice, speed=speed):
             audio = getattr(result, "audio", None)
             if audio is None and isinstance(result, (tuple, list)):
                 audio = result[-1]
             if audio is None:      # segment produced no audio (e.g. a pause)
-                continue
+                continue           # ... so the sample offset must not advance
             audio = _as_float_mono(audio)
+
+            # Rebase the segment's word marks onto the request timeline.
+            seg_base = offset / sr
+            pending = [
+                Mark(
+                    kind="word",
+                    text=getattr(t, "text", "") or "",
+                    phonemes=t.phonemes,
+                    start=seg_base + float(t.start_ts),
+                    end=seg_base + float(t.end_ts),
+                )
+                for t in (getattr(result, "tokens", None) or [])
+                if getattr(t, "phonemes", None)
+                and getattr(t, "start_ts", None) is not None
+                and getattr(t, "end_ts", None) is not None
+            ]
+
             for s in range(0, len(audio), step):
                 frame = audio[s:s + step]
-                if frame.size:
-                    yield frame
+                if not frame.size:
+                    continue
+                frame_end = (offset + frame.size) / sr
+                # Emit each mark with the frame whose range contains its
+                # start. On the segment's last frame, flush whatever remains:
+                # rounding in join_timestamps can push a final token's start
+                # just past the end of the segment's audio.
+                last = s + step >= len(audio)
+                out = [m for m in pending if m.start < frame_end or last]
+                pending = [m for m in pending
+                           if m.start >= frame_end and not last]
+                offset += frame.size
+                yield frame, out
 
 
 # --------------------------------------------------------------------------- #
@@ -496,7 +601,7 @@ class SSEngine(abc.ABC):
     changes are needed in routing, framing or the manager.
 
     Backends bundled here:
-    * ``MockEngine``     -- dependency-free placeholder that echoes back the first
+    * ``MockSSEngine``   -- dependency-free placeholder that echoes back the first
       few words of a synthetic transcript.
     * ``VoxtralEngine``  -- mistralai/Voxtral-Small-24B via transformers.
     * ``WhisperEngine``  -- openai/whisper-large-v3 (or tiny/small/…) via native
@@ -556,7 +661,7 @@ class SSEngine(abc.ABC):
 # Mock SST backend                                                            #
 # --------------------------------------------------------------------------- #
 @_sst_register
-class MockEngine(SSEngine):
+class MockSSEngine(SSEngine):
     """Generates a short synthetic transcript. No deps, no GPU needed."""
 
     NAME = "mock"

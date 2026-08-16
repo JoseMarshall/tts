@@ -53,7 +53,12 @@ async def main() -> None:
                 ctrl = json.loads(frame)
                 if ctrl["type"] == "start":
                     sample_rate = ctrl["sample_rate"]
-                    print(f"segment {i}: start (model={ctrl['model']})")
+                    print(f"segment {i}: start (model={ctrl['model']}, "
+                          f"supports_marks={ctrl.get('supports_marks')})")
+                elif ctrl["type"] == "marks":
+                    # Word timings for lip sync — ignore unknown frame types.
+                    words = " ".join(m["text"] for m in ctrl["marks"])
+                    print(f"segment {i}: marks [{words}]")
                 elif ctrl["type"] == "end":
                     print(f"segment {i}: end, total {len(pcm)} bytes")
                     break

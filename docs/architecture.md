@@ -62,10 +62,19 @@ class's `capabilities()` (speakers, languages, defaults). Class metadata
   44.1 kHz and isn't natively streaming, so it generates then re-chunks.
 
 ### `Synthesizer` (`streaming.py`)
-Owns one engine plus the concurrency machinery:
+Owns an engine pool plus the concurrency machinery:
 
-- A `Semaphore(1)` serialises generation, because a single model instance is not
-  safe to run concurrently.
+- An **`EnginePool`** holds N interchangeable instances of the model; a
+  generation borrows one for its duration. The free-queue *is* the semaphore —
+  `acquire()` blocks when every replica is busy — so the default
+  `TTS_ENGINE_REPLICAS=1` is exactly the old `Semaphore(1)`, and one model
+  instance still never runs two generations at once.
+- Replicas past the first are built **in the background** (`pool.fill()`), so
+  the first request doesn't pay for all of them; a partially-filled pool is just
+  a smaller pool. Each replica is warmed, so no request lands on a cold one.
+  `>1` requires the backend to declare `SUPPORTS_REPLICAS`, because two Python
+  objects sharing a global (espeak-ng, a module cache) are not two independent
+  models — and that failure is wrong output, not a crash.
 - Generation is blocking and GPU-bound, so it runs on a **worker thread**.
   Produced PCM byte frames go through a **bounded `queue.Queue`** (backpressure —
   the worker blocks if the client is slow), and an async consumer pulls from it
